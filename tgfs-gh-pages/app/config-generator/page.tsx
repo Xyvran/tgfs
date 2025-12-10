@@ -101,7 +101,8 @@ const generateRandomSecret = (): string => {
 };
 
 export default function ConfigGenerator() {
-  const [withUserAccount, setWithUserAccount] = useState(false);
+  const [withUserAccountUpload, setWithUserAccountUpload] = useState(false);
+  const [withUserAccountDownload, setWithUserAccountDownload] = useState(false);
 
   const [config, setConfig] = useState<ConfigData>({
     telegram: {
@@ -244,16 +245,18 @@ export default function ConfigGenerator() {
         api_id: config.telegram.api_id,
         api_hash: config.telegram.api_hash,
         lib: config.telegram.lib,
-        ...(withUserAccount ||
-        Object.values(metadata).some(
-          (channel) => channel.type === "pinned_message"
-        )
+        ...(withUserAccountUpload ||
+          withUserAccountDownload ||
+          Object.values(metadata).some(
+            (channel) => channel.type === "pinned_message"
+          )
           ? {
-              account: {
-                session_file: "account.session",
-                used_to_upload: withUserAccount,
-              },
-            }
+            account: {
+              session_file: "account.session",
+              used_to_upload: withUserAccountUpload,
+              used_to_download: withUserAccountDownload,
+            },
+          }
           : {}),
         bot: {
           session_file: config.telegram.bot.session_file,
@@ -545,9 +548,20 @@ export default function ConfigGenerator() {
                 label="Use user account to upload files (No benefit unless you are a premium user)"
                 control={
                   <Checkbox
-                    checked={withUserAccount}
+                    checked={withUserAccountUpload}
                     onChange={(e) => {
-                      setWithUserAccount(e.target.checked);
+                      setWithUserAccountUpload(e.target.checked);
+                    }}
+                  />
+                }
+              />
+              <FormControlLabel
+                label="Use user account to download files (No known benefit)"
+                control={
+                  <Checkbox
+                    checked={withUserAccountDownload}
+                    onChange={(e) => {
+                      setWithUserAccountDownload(e.target.checked);
                     }}
                   />
                 }

@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-from getpass import getpass
 from typing import List, Optional, Sequence
 
 from telethon import TelegramClient
@@ -333,7 +332,7 @@ async def login_as_account(config: Config) -> TelegramClient:
                 phone=phone_number, code=code, phone_code_hash=sms_req.phone_code_hash
             )
         except SessionPasswordNeededError:
-            password = getpass("Enter the 2FA password: ")
+            password = input("Enter the 2FA password: ")
             await client.sign_in(password=password)
         except Exception as e:
             logger.error(f"Failed to sign in: {e}")

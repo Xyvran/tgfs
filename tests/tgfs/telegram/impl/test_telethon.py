@@ -697,7 +697,6 @@ class TestLoginAsAccount:
         MockSession = mocker.patch("tgfs.telegram.impl.telethon.Session")
         MockTelegramClient = mocker.patch("tgfs.telegram.impl.telethon.TelegramClient")
         mock_input = mocker.patch("builtins.input")
-        mock_getpass = mocker.patch("tgfs.telegram.impl.telethon.getpass")
 
         mock_session_instance = MockSession.return_value
         mock_session_instance.get.return_value = None
@@ -715,8 +714,7 @@ class TestLoginAsAccount:
         mock_client.session = mocker.Mock()
         mock_client.session.save.return_value = "new_session_string"
 
-        mock_input.side_effect = ["+1234567890", "123456"]
-        mock_getpass.return_value = "2fa_password"
+        mock_input.side_effect = ["+1234567890", "123456", "2fa_password"]
 
         result = await login_as_account(mock_config)
 
