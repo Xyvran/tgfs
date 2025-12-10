@@ -4,7 +4,6 @@ from pys3.folder import Folder as _Folder
 from pys3.member import Member
 from tgfs.app.fs_cache import FSCache, gfc
 from tgfs.core import Client, Ops
-from tgfs.utils.time import FIRST_DAY_OF_EPOCH, ts
 
 from .resource import Resource
 
