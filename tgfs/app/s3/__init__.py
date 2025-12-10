@@ -1,7 +1,7 @@
 from typing import Optional
 
-from asgidav.app import METHODS, create_app
-from asgidav.member import Member
+from pys3.app import create_app
+from pys3.member import Member
 from tgfs.app.fs_cache import FSCache, gfc
 from tgfs.app.utils import split_global_path
 from tgfs.core import Clients
@@ -26,7 +26,7 @@ async def _get_member(path: str, clients: Clients) -> Optional[Member]:
     return None
 
 
-def create_webdav_app(clients: Clients, base_path: str = ""):
+def create_s3_app(clients: Clients, base_path: str = ""):
     for name, client in clients.items():
         cache = FSCache[Member]()
         cache.set("/", Folder("/", client))
@@ -39,6 +39,5 @@ def create_webdav_app(clients: Clients, base_path: str = ""):
 
 
 __all__ = [
-    "create_webdav_app",
-    "METHODS",
+    "create_s3_app",
 ]

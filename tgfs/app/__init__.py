@@ -14,6 +14,7 @@ from tgfs.config import Config
 from tgfs.core.client import Clients
 
 from .manager import create_manager_app
+from .s3 import create_s3_app
 from .webdav import METHODS, create_webdav_app
 
 READONLY_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PROPFIND"})
@@ -60,6 +61,8 @@ def create_app(clients: Clients, config: Config) -> FastAPI:
     async def auth_middleware(request: Request, call_next: Callable[[Any], Any]) -> Any:
         if request.method == "OPTIONS" or request.url.path == "/login":
             return await call_next(request)
+        if request.url.path.startswith("/s3"):
+            return await call_next(request)
 
         auth_header = request.headers.get("Authorization")
         if not auth_header:
@@ -100,5 +103,8 @@ def create_app(clients: Clients, config: Config) -> FastAPI:
 
     webdav_app = cors(create_webdav_app(clients, "/webdav"))
     app.mount("/webdav", webdav_app)
+
+    s3_app = cors(create_s3_app(clients, "/s3"))
+    app.mount("/s3", s3_app)
 
     return app

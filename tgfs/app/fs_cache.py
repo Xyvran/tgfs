@@ -1,15 +1,13 @@
 from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TypeVar
 
-from asgidav.member import Member
-
-MaybeMember = Optional[Member]
+T = TypeVar("T")
 
 
-class FSCache:
-    def __init__(self, value: MaybeMember = None):
+class FSCache[T]:
+    def __init__(self, value: Optional[T] = None):
         self._cache: Dict[str, FSCache] = defaultdict(FSCache)
-        self._value: MaybeMember = value
+        self._value: Optional[T] = value
 
     @staticmethod
     def split_path(path: str) -> List[str]:
@@ -23,16 +21,16 @@ class FSCache:
             return self
         return self._cache[parts[0]].__get(parts[1:])
 
-    def get(self, parts: str) -> MaybeMember:
+    def get(self, parts: str) -> Optional[T]:
         return self.__get(self.split_path(parts))._value
 
-    def __set(self, path: List[str], value: MaybeMember):
+    def __set(self, path: List[str], value: Optional[T]):
         if len(path) == 1:
             self._cache[path[0]] = FSCache(value)
         else:
             self._cache[path[0]].__set(path[1:], value)
 
-    def set(self, path: str, value: MaybeMember):
+    def set(self, path: str, value: Optional[T]):
         self.__set(self.split_path(path), value)
 
     def reset(self, path: str):

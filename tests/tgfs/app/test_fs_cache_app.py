@@ -46,19 +46,22 @@ class MockMember(Member):
         pass
 
 
+FC = FSCache[MockMember]
+
+
 class TestFSCache:
     """Test suite for FSCache class"""
 
     def test_init_default(self):
         """Test FSCache initialization with default value"""
-        cache = FSCache()
+        cache = FC()
         assert cache._value is None
         assert isinstance(cache._cache, dict)
 
     def test_init_with_value(self):
         """Test FSCache initialization with a value"""
         member = MockMember("/test", "test_file")
-        cache = FSCache(member)
+        cache = FC(member)
         assert cache._value == member
         assert isinstance(cache._cache, dict)
 
@@ -119,7 +122,7 @@ class TestCacheOperations:
 
     def test_set_and_get_root(self):
         """Test setting and getting value at root"""
-        cache = FSCache()
+        cache = FC()
         member = MockMember("/", "root")
 
         cache.set("/", member)
@@ -129,7 +132,7 @@ class TestCacheOperations:
 
     def test_set_and_get_single_level(self):
         """Test setting and getting single level path"""
-        cache = FSCache()
+        cache = FC()
         member = MockMember("/test", "test_file")
 
         cache.set("/test", member)
@@ -139,7 +142,7 @@ class TestCacheOperations:
 
     def test_set_and_get_multi_level(self):
         """Test setting and getting multi-level path"""
-        cache = FSCache()
+        cache = FC()
         member = MockMember("/test/sub/file.txt", "file.txt")
 
         cache.set("/test/sub/file.txt", member)
@@ -149,13 +152,13 @@ class TestCacheOperations:
 
     def test_get_nonexistent_path(self):
         """Test getting a non-existent path returns None"""
-        cache = FSCache()
+        cache = FC()
         result = cache.get("/nonexistent")
         assert result is None
 
     def test_get_partial_path(self):
         """Test getting a partial path that exists but has no value"""
-        cache = FSCache()
+        cache = FC()
         member = MockMember("/test/file.txt", "file.txt")
 
         cache.set("/test/file.txt", member)
@@ -166,7 +169,7 @@ class TestCacheOperations:
 
     def test_overwrite_existing_value(self):
         """Test overwriting an existing value"""
-        cache = FSCache()
+        cache = FC()
         member1 = MockMember("/test", "original")
         member2 = MockMember("/test", "updated")
 
@@ -178,7 +181,7 @@ class TestCacheOperations:
 
     def test_set_none_value(self):
         """Test setting None value"""
-        cache = FSCache()
+        cache = FC()
         cache.set("/test", None)
         result = cache.get("/test")
         assert result is None
@@ -189,7 +192,7 @@ class TestResetOperations:
 
     def test_reset_single_path(self):
         """Test resetting a single path"""
-        cache = FSCache()
+        cache = FC()
         member = MockMember("/test", "test_file")
 
         cache.set("/test", member)
@@ -200,7 +203,7 @@ class TestResetOperations:
 
     def test_reset_multi_level_path(self):
         """Test resetting a multi-level path"""
-        cache = FSCache()
+        cache = FC()
         member = MockMember("/test/sub/file.txt", "file.txt")
 
         cache.set("/test/sub/file.txt", member)
@@ -211,7 +214,7 @@ class TestResetOperations:
 
     def test_reset_affects_children(self):
         """Test that reset affects child paths"""
-        cache = FSCache()
+        cache = FC()
         member1 = MockMember("/test/file1.txt", "file1")
         member2 = MockMember("/test/file2.txt", "file2")
 
@@ -226,12 +229,12 @@ class TestResetOperations:
 
     def test_reset_nonexistent_path(self):
         """Test resetting a non-existent path doesn't cause errors"""
-        cache = FSCache()
+        cache = FC()
         cache.reset("/nonexistent")  # Should not raise exception
 
     def test_reset_parent_basic(self):
         """Test basic reset_parent functionality"""
-        cache = FSCache()
+        cache = FC()
         parent_member = MockMember("/test", "parent")
         child_member = MockMember("/test/child", "child")
 
@@ -246,7 +249,7 @@ class TestResetOperations:
 
     def test_reset_parent_multi_level(self):
         """Test reset_parent with multi-level hierarchy"""
-        cache = FSCache()
+        cache = FC()
         cache.set("/", MockMember("/", "root"))
         cache.set("/test", MockMember("/test", "test"))
         cache.set("/test/sub", MockMember("/test/sub", "sub"))
@@ -262,7 +265,7 @@ class TestResetOperations:
 
     def test_reset_parent_root_child(self):
         """Test reset_parent for direct root children"""
-        cache = FSCache()
+        cache = FC()
         cache.set("/", MockMember("/", "root"))
         cache.set("/test", MockMember("/test", "test"))
 
@@ -278,7 +281,7 @@ class TestEdgeCases:
 
     def test_empty_string_path(self):
         """Test handling of empty string path"""
-        cache = FSCache()
+        cache = FC()
         member = MockMember("", "empty")
 
         cache.set("", member)
@@ -288,7 +291,7 @@ class TestEdgeCases:
 
     def test_whitespace_only_paths(self):
         """Test handling of whitespace-only paths"""
-        cache = FSCache()
+        cache = FC()
         member = MockMember("  ", "whitespace")
 
         cache.set("  ", member)
@@ -298,7 +301,7 @@ class TestEdgeCases:
 
     def test_consecutive_slashes(self):
         """Test handling of paths with consecutive slashes"""
-        cache = FSCache()
+        cache = FC()
         member = MockMember("/test//file", "file")
 
         # The split_path method normalizes these
@@ -309,7 +312,7 @@ class TestEdgeCases:
 
     def test_path_variations_equivalent(self):
         """Test that some path variations are treated equivalently"""
-        cache = FSCache()
+        cache = FC()
         member = MockMember("/test", "test")
 
         cache.set("/test", member)
@@ -324,7 +327,7 @@ class TestEdgeCases:
 
     def test_recursive_path_creation(self):
         """Test that intermediate paths are created automatically"""
-        cache = FSCache()
+        cache = FC()
         member = MockMember("/a/b/c/d/e", "deep_file")
 
         cache.set("/a/b/c/d/e", member)
@@ -340,8 +343,8 @@ class TestEdgeCases:
 
     def test_cache_isolation(self):
         """Test that different cache instances are isolated"""
-        cache1 = FSCache()
-        cache2 = FSCache()
+        cache1 = FC()
+        cache2 = FC()
 
         member1 = MockMember("/test", "cache1")
         member2 = MockMember("/test", "cache2")
@@ -370,7 +373,7 @@ class TestGlobalCache:
         """Test that global cache can store FSCache instances"""
         gfc.clear()
 
-        cache = FSCache()
+        cache = FC()
         gfc["test_key"] = cache
 
         assert "test_key" in gfc
@@ -380,8 +383,8 @@ class TestGlobalCache:
         """Test global cache with multiple entries"""
         gfc.clear()
 
-        cache1 = FSCache()
-        cache2 = FSCache()
+        cache1 = FC()
+        cache2 = FC()
 
         gfc["cache1"] = cache1
         gfc["cache2"] = cache2
@@ -396,7 +399,7 @@ class TestIntegrationScenarios:
 
     def test_complex_file_system_simulation(self):
         """Test a complex file system simulation"""
-        cache = FSCache()
+        cache = FC()
 
         # Create a file system structure
         cache.set("/", MockMember("/", "root"))
@@ -437,7 +440,7 @@ class TestIntegrationScenarios:
 
     def test_cache_update_workflow(self):
         """Test a typical cache update workflow"""
-        cache = FSCache()
+        cache = FC()
 
         # Initial setup
         original_file = MockMember("/test/file.txt", "original")
@@ -462,7 +465,7 @@ class TestIntegrationScenarios:
 
     def test_concurrent_path_access(self):
         """Test concurrent access to overlapping paths"""
-        cache = FSCache()
+        cache = FC()
 
         # Set up overlapping paths
         cache.set("/test", MockMember("/test", "test_dir"))
