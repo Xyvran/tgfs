@@ -149,6 +149,21 @@ class MessageApi(MessageBroker):
     async def download_file(
         self, message_id: int, begin: int, end: int
     ) -> DownloadFileResp:
+        if (
+            (account_config := get_config().telegram.account)
+            and account_config.used_to_download
+            and (account := self.tdlib.account)
+        ):
+            return await account.download_file(
+                DownloadFileReq(
+                    chat=self.private_file_channel,
+                    message_id=message_id,
+                    chunk_size=get_config().tgfs.download.chunk_size_kb,
+                    begin=begin,
+                    end=end,
+                )
+            )
+
         if end > 0 and is_big_file(self._size(begin, end)):
             return await self.download_file_parallel(message_id, begin, end)
 
