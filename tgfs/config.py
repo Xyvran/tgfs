@@ -124,13 +124,32 @@ class MetadataConfig:
 
 
 @dataclass
+class S3Config:
+    access_key_id: str
+    secret_access_key: str
+    region: str = "us-east-1"
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "S3Config":
+        return cls(
+            access_key_id=data["access_key_id"],
+            secret_access_key=data["secret_access_key"],
+        )
+
+
+@dataclass
 class ServerConfig:
     host: str
     port: int
+    s3: S3Config
 
     @classmethod
     def from_dict(cls, data: Dict) -> "ServerConfig":
-        return cls(host=data["host"], port=data["port"])
+        return cls(
+            host=data["host"],
+            port=data["port"],
+            s3=S3Config.from_dict(data["s3"]),
+        )
 
 
 @dataclass

@@ -6,6 +6,9 @@ from fastapi import FastAPI, Header, Query, Response
 from fastapi.responses import StreamingResponse
 from starlette.requests import Request
 
+from tgfs.config import get_config
+
+from .auth import AWSAuth
 from .member import Member
 from .resource import Resource
 
@@ -76,6 +79,11 @@ def create_app(
         auth_header: Annotated[Optional[str], Header(alias="Authorization")] = None,
         range_header: Annotated[Optional[str], Header(alias="range")] = None,
     ):
+        config = get_config()
+        if not await AWSAuth(
+            config.tgfs.server.s3.access_key_id, config.tgfs.server.s3.secret_access_key
+        ).authenticate(request):
+            return Response(status_code=HTTPStatus.UNAUTHORIZED)
         print(request.headers)
         print(f"GET Object: key={key}")
         print(f"  list_type={list_type}")

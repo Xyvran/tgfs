@@ -6,3 +6,4 @@ CLAUDE.md
 dist/
 coverage.xml
 .coverage
+.env
