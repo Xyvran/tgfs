@@ -93,12 +93,16 @@ def create_app(
         print(f"  response_content_encoding={response_content_encoding}")
         print(f"  response_content_language={response_content_language}")
         print(f"  response_content_type={response_content_type}")
-        print(f"  response_expires={response_expires}")
         print(f"  version_id={version_id}")
-        print(f"  auth_header={auth_header}")
-        print(f"  range_header={range_header}")
+
+        def parse_range() -> tuple[int, int]:
+            if range_header:
+                begin, end = range_header.replace("bytes=", "").split("-")
+                return int(begin or 0), int(end or -1)
+            return 0, -1
+
         if member := await get_member(f"/{key}"):
-            begin, end = 0, -1
+            begin, end = parse_range()
             if isinstance(member, Resource):
                 content, media_type, last_modified, content_length = (
                     await asyncio.gather(
