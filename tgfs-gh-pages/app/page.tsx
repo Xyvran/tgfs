@@ -2,20 +2,20 @@ import Link from "next/link";
 
 export default function Home() {
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-900 dark:to-slate-800">
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800">
       <div className="container mx-auto px-6 py-12">
         <header className="text-center mb-16">
-          <h1 className="text-5xl font-bold text-slate-900 dark:text-white mb-4">
+          <h1 className="text-5xl font-bold text-white mb-4">
             TGFS
           </h1>
-          <p className="text-xl text-slate-600 dark:text-slate-300 max-w-2xl mx-auto">
+          <p className="text-xl text-slate-300 max-w-2xl mx-auto">
             Telegram becomes a WebDAV server.
           </p>
         </header>
 
         <div className="grid md:grid-cols-2 gap-8 max-w-4xl mx-auto mb-16">
           <Link href="/config-generator" className="group">
-            <div className="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-lg hover:shadow-xl transition-all duration-300 border border-slate-200 dark:border-slate-700 group-hover:border-blue-300 dark:group-hover:border-blue-600">
+            <div className="bg-slate-800 rounded-xl p-8 shadow-lg hover:shadow-xl transition-all duration-300 border border-slate-700 group-hover:border-blue-600">
               <div className="flex items-center mb-4">
                 <div className="w-12 h-12 bg-blue-500 rounded-lg flex items-center justify-center mr-4">
                   <svg
@@ -38,18 +38,18 @@ export default function Home() {
                     />
                   </svg>
                 </div>
-                <h2 className="text-2xl font-semibold text-slate-900 dark:text-white">
+                <h2 className="text-2xl font-semibold text-white">
                   Config Generator
                 </h2>
               </div>
-              <div className="text-blue-600 dark:text-blue-400 font-medium group-hover:text-blue-700 dark:group-hover:text-blue-300">
+              <div className="text-blue-400 font-medium group-hover:text-blue-300">
                 Generate Config →
               </div>
             </div>
           </Link>
 
           <Link href="/telegram-mini-app" className="group">
-            <div className="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-lg hover:shadow-xl transition-all duration-300 border border-slate-200 dark:border-slate-700 group-hover:border-green-300 dark:group-hover:border-green-600">
+            <div className="bg-slate-800 rounded-xl p-8 shadow-lg hover:shadow-xl transition-all duration-300 border border-slate-700 group-hover:border-green-600">
               <div className="flex items-center mb-4">
                 <div className="w-12 h-12 bg-green-500 rounded-lg flex items-center justify-center mr-4">
                   <svg
@@ -66,11 +66,11 @@ export default function Home() {
                     />
                   </svg>
                 </div>
-                <h2 className="text-2xl font-semibold text-slate-900 dark:text-white">
+                <h2 className="text-2xl font-semibold text-white">
                   Telegram Mini App
                 </h2>
               </div>
-              <div className="text-green-600 dark:text-green-400 font-medium group-hover:text-green-700 dark:group-hover:text-green-300">
+              <div className="text-green-400 font-medium group-hover:text-green-300">
                 Open Mini App →
               </div>
             </div>
@@ -80,7 +80,7 @@ export default function Home() {
         <div className="text-center">
           <Link
             href="/getting-started"
-            className="inline-flex items-center px-6 py-3 bg-slate-900 dark:bg-white text-white dark:text-slate-900 rounded-lg font-medium hover:bg-slate-800 dark:hover:bg-slate-100 transition-colors"
+            className="inline-flex items-center px-6 py-3 bg-slate-800 text-white rounded-lg font-medium hover:bg-slate-700 transition-colors"
           >
             <svg
               className="w-5 h-5 mr-2"
@@ -99,8 +99,8 @@ export default function Home() {
           </Link>
         </div>
 
-        <footer className="mt-16 pt-8 border-t border-slate-200 dark:border-slate-700 text-center">
-          <p className="text-slate-500 dark:text-slate-400">
+        <footer className="mt-16 pt-8 border-t border-slate-700 text-center">
+          <p className="text-slate-400">
             Proudly Vibed by{" "}
             <a
               href="https://www.anthropic.com/claude-code"
