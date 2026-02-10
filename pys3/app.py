@@ -46,7 +46,6 @@ def create_app(
         range_header: Annotated[Optional[str], Header(alias="range")] = None,
     ):
         if member := await get_member(f"/{key}"):
-            begin, end = 0, -1
             if isinstance(member, Resource):
                 last_modified = await member.last_modified()
 
@@ -84,16 +83,6 @@ def create_app(
             config.tgfs.server.s3.access_key_id, config.tgfs.server.s3.secret_access_key
         ).authenticate(request):
             return Response(status_code=HTTPStatus.UNAUTHORIZED)
-        print(request.headers)
-        print(f"GET Object: key={key}")
-        print(f"  list_type={list_type}")
-        print(f"  part_number={part_number}")
-        print(f"  response_cache_control={response_cache_control}")
-        print(f"  response_content_disposition={response_content_disposition}")
-        print(f"  response_content_encoding={response_content_encoding}")
-        print(f"  response_content_language={response_content_language}")
-        print(f"  response_content_type={response_content_type}")
-        print(f"  version_id={version_id}")
 
         def parse_range() -> tuple[int, int]:
             if range_header:
