@@ -2,8 +2,14 @@ config.yaml
 /**/__pycache__/
 .idea
 .vscode/
-CLAUDE.md
 dist/
 coverage.xml
 .coverage
 .env
+
+# Agents
+CLAUDE.md
+AGENTS.md
+agent-docs/
+.agents
+.claude
