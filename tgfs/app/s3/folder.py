@@ -72,10 +72,10 @@ class Folder(_Folder):
         return await self.__ops.mkdir(self._sub_path(name), False)
 
     async def creation_date(self) -> str:
-        return "0000-01-01T00:00:00Z"
+        return "1970-01-01T00:00:00Z"
 
     async def last_modified(self) -> str:
-        return "0000-01-01T00:00:00Z"
+        return "1970-01-01T00:00:00Z"
 
     async def remove(self) -> None:
         self.fs_cache.reset_parent(self.__relative_path)
@@ -128,10 +128,10 @@ class RootFolder(_Folder):
         return await folder.create_empty_resource(sub_path)
 
     async def creation_date(self) -> str:
-        return "0000-01-01T00:00:00Z"
+        return "1970-01-01T00:00:00Z"
 
     async def last_modified(self) -> str:
-        return "0000-01-01T00:00:00Z"
+        return "1970-01-01T00:00:00Z"
 
     async def remove(self) -> None:
         raise NotImplementedError("RootFolder does not support removal")

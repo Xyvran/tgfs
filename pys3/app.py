@@ -43,9 +43,18 @@ def create_app(
         headers={"Content-Type": "text/plain"},
     )
 
+    async def authenticate(request: Request) -> bool:
+        config = get_config()
+        return await authenticate_request(
+            request,
+            config.tgfs.server.s3.access_key_id,
+            config.tgfs.server.s3.secret_access_key,
+        )
+
     @app.head("/{key:path}")
     async def route_head(
         key: str,
+        request: Request,
         host: Annotated[str, Header()],
         part_number: Optional[int] = q("partNumber"),
         response_cache_control: Optional[str] = q("response-cache-control"),
@@ -58,6 +67,9 @@ def create_app(
         auth_header: Annotated[Optional[str], Header(alias="Authorization")] = None,
         range_header: Annotated[Optional[str], Header(alias="range")] = None,
     ):
+        if not await authenticate(request):
+            return Response(status_code=HTTPStatus.UNAUTHORIZED)
+
         member = await get_member(f"/{key}")
         if not member or not isinstance(member, Resource):
             return NOT_FOUND
@@ -75,6 +87,7 @@ def create_app(
         max_keys: Optional[int] = q("max-keys"),
         continuation_token: Optional[str] = q("continuation-token"),
         start_after: Optional[str] = q("start-after"),
+        marker: Optional[str] = q("marker"),
         encoding_type: Optional[str] = q("encoding-type"),
         part_number: Optional[int] = q("partNumber"),
         response_cache_control: Optional[str] = q("response-cache-control"),
@@ -87,12 +100,7 @@ def create_app(
         auth_header: Annotated[Optional[str], Header(alias="Authorization")] = None,
         range_header: Annotated[Optional[str], Header(alias="range")] = None,
     ):
-        config = get_config()
-        if not await authenticate_request(
-            request,
-            config.tgfs.server.s3.access_key_id,
-            config.tgfs.server.s3.secret_access_key,
-        ):
+        if not await authenticate(request):
             return Response(status_code=HTTPStatus.UNAUTHORIZED)
 
         # ListBuckets: GET /
@@ -103,7 +111,8 @@ def create_app(
             return NOT_FOUND
 
         # ListObjectsV2: GET /{bucket}[/{prefix}]?list-type=2
-        if list_type == "2":
+        # ListObjectsV1: GET /{bucket}[/{prefix}]?delimiter=...&prefix=...
+        if list_type == "2" or delimiter is not None:
             bucket_name, effective_prefix = parse_bucket_key(key, prefix)
 
             bucket_folder = await get_member(f"/{bucket_name}")
@@ -116,7 +125,7 @@ def create_app(
                 prefix=effective_prefix,
                 delimiter=delimiter,
                 max_keys=max_keys or 1000,
-                start_after=start_after,
+                start_after=start_after or marker,
                 continuation_token=continuation_token,
                 encoding_type=encoding_type,
             )
