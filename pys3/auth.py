@@ -57,10 +57,10 @@ class AWSAuthBase(ABC):
     def _sign(key: bytes, msg: str) -> bytes:
         return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
 
-    def _derive_signing_key(self, date: str) -> bytes:
+    def _derive_signing_key(self, date: str, region: str, service: str) -> bytes:
         k_date = self._sign(f"AWS4{self.secret_access_key}".encode("utf-8"), date)
-        k_region = self._sign(k_date, "us-east-1")
-        k_service = self._sign(k_region, "s3")
+        k_region = self._sign(k_date, region)
+        k_service = self._sign(k_region, service)
         return self._sign(k_service, "aws4_request")
 
     def _get_payload_hash(self, request: Request, body: bytes) -> str:
@@ -83,6 +83,10 @@ class AWSAuthBase(ABC):
             for k in sorted(params.keys())
         )
 
+    @staticmethod
+    def _canonical_uri(request: Request) -> str:
+        return quote(request.url.path, safe="/")
+
     async def _create_canonical_request(self, request: Request) -> str:
         canonical_querystring = self._build_canonical_query_string(request)
         signed_headers = self._get_signed_headers(request)
@@ -98,7 +102,7 @@ class AWSAuthBase(ABC):
 
         return (
             f"{request.method}\n"
-            f"{request.url.path}\n"
+            f"{self._canonical_uri(request)}\n"
             f"{canonical_querystring}\n"
             f"{canonical_headers}\n"
             f"{signed_headers}\n"
@@ -131,8 +135,10 @@ class AWSAuthBase(ABC):
             return False
 
         string_to_sign = await self._create_string_to_sign(request)
-        date = self._get_request_date(request)
-        signing_key = self._derive_signing_key(date)
+        credential_scope, _ = self._get_credential_scope_and_date(request)
+        # scope format: date/region/service/aws4_request
+        scope_parts = credential_scope.split("/")
+        signing_key = self._derive_signing_key(scope_parts[0], scope_parts[1], scope_parts[2])
 
         calculated_signature = hmac.new(
             signing_key, string_to_sign.encode("utf-8"), hashlib.sha256
@@ -169,8 +175,11 @@ class AWSHeaderAuth(AWSAuthBase):
         return auth_params.get("SignedHeaders", "")
 
     def _get_credential_scope_and_date(self, request: Request) -> Tuple[str, str]:
+        auth_params = self._parse_authorization_header(request)
+        credential = auth_params.get("Credential", "")
+        parts = credential.split("/", 1)
+        scope = parts[1] if len(parts) > 1 else ""
         request_date_time = request.headers.get("x-amz-date", "")
-        scope = f"{request_date_time[:8]}/us-east-1/s3/aws4_request"
         return scope, request_date_time
 
     def _get_provided_signature(self, request: Request) -> str:

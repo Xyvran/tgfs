@@ -9,8 +9,10 @@ from pys3.resource import Resource
 
 def _parse_range_header(range_header: Optional[str]) -> Tuple[int, int]:
     if range_header:
-        begin, end = range_header.replace("bytes=", "").split("-")
-        return int(begin or 0), int(end or -1)
+        begin_str, end_str = range_header.replace("bytes=", "").split("-", 1)
+        begin = int(begin_str) if begin_str else 0
+        end = int(end_str) if end_str else -1
+        return begin, end
     return 0, -1
 
 
@@ -26,12 +28,19 @@ async def handle_get_object(
         resource.content_length(),
     )
 
+    headers = {
+        "Last-Modified": str(last_modified),
+        "Accept-Ranges": "bytes",
+    }
+
+    if range_header is not None:
+        status_code = HTTPStatus.PARTIAL_CONTENT
+    else:
+        status_code = HTTPStatus.OK
+
     return StreamingResponse(
         content=content,
-        status_code=HTTPStatus.OK,
+        status_code=status_code,
         media_type=media_type,
-        headers={
-            "Last-Modified": str(last_modified),
-            "Accept-Ranges": "bytes",
-        },
+        headers=headers,
     )

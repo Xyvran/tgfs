@@ -43,13 +43,19 @@ def create_app(
         headers={"Content-Type": "text/plain"},
     )
 
-    async def authenticate(request: Request) -> bool:
+    async def authenticate_middleware(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ):
         config = get_config()
-        return await authenticate_request(
+        if not await authenticate_request(
             request,
             config.tgfs.server.s3.access_key_id,
             config.tgfs.server.s3.secret_access_key,
-        )
+        ):
+            return Response(status_code=HTTPStatus.UNAUTHORIZED)
+        return await call_next(request)
+
+    app.middleware("http")(authenticate_middleware)
 
     @app.head("/{key:path}")
     async def route_head(
@@ -67,9 +73,6 @@ def create_app(
         auth_header: Annotated[Optional[str], Header(alias="Authorization")] = None,
         range_header: Annotated[Optional[str], Header(alias="range")] = None,
     ):
-        if not await authenticate(request):
-            return Response(status_code=HTTPStatus.UNAUTHORIZED)
-
         member = await get_member(f"/{key}")
         if not member or not isinstance(member, Resource):
             return NOT_FOUND
@@ -89,6 +92,7 @@ def create_app(
         start_after: Optional[str] = q("start-after"),
         marker: Optional[str] = q("marker"),
         encoding_type: Optional[str] = q("encoding-type"),
+        location: Optional[str] = q("location"),
         part_number: Optional[int] = q("partNumber"),
         response_cache_control: Optional[str] = q("response-cache-control"),
         response_content_disposition: Optional[str] = q("response-content-disposition"),
@@ -100,28 +104,19 @@ def create_app(
         auth_header: Annotated[Optional[str], Header(alias="Authorization")] = None,
         range_header: Annotated[Optional[str], Header(alias="range")] = None,
     ):
-        if not await authenticate(request):
-            return Response(status_code=HTTPStatus.UNAUTHORIZED)
-
-        # ListBuckets: GET /
-        if key == "" or key == "/":
-            root_folder = await get_member("/")
-            if root_folder and isinstance(root_folder, Folder):
-                return await handle_list_buckets(root_folder)
-            return NOT_FOUND
-
         # ListObjectsV2: GET /{bucket}[/{prefix}]?list-type=2
         # ListObjectsV1: GET /{bucket}[/{prefix}]?delimiter=...&prefix=...
         if list_type == "2" or delimiter is not None:
             bucket_name, effective_prefix = parse_bucket_key(key, prefix)
 
-            bucket_folder = await get_member(f"/{bucket_name}")
+            # If key is empty, treat root folder as the bucket
+            bucket_folder = await get_member(f"/{bucket_name}" if bucket_name else "/")
             if not bucket_folder or not isinstance(bucket_folder, Folder):
                 return NOT_FOUND
 
             return await handle_list_objects_v2(
                 folder=bucket_folder,
-                bucket_name=bucket_name,
+                bucket_name=bucket_name or "/",
                 prefix=effective_prefix,
                 delimiter=delimiter,
                 max_keys=max_keys or 1000,
@@ -129,6 +124,13 @@ def create_app(
                 continuation_token=continuation_token,
                 encoding_type=encoding_type,
             )
+
+        # ListBuckets: GET /
+        if key == "" or key == "/":
+            root_folder = await get_member("/")
+            if root_folder and isinstance(root_folder, Folder):
+                return await handle_list_buckets(root_folder)
+            return NOT_FOUND
 
         # GetObject: GET /{bucket}/{key}
         member = await get_member(f"/{key}")

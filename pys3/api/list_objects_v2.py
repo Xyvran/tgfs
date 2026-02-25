@@ -9,7 +9,7 @@ from fastapi import Response
 from pys3.folder import Folder
 from pys3.member import Member
 from pys3.resource import Resource
-from pys3.xml.list_objects_v2 import (
+from pys3.xml_builder.list_objects_v2 import (
     CommonPrefix,
     ListObjectsV2Result,
     S3Object,

@@ -3,7 +3,7 @@ from http import HTTPStatus
 from fastapi import Response
 
 from pys3.folder import Folder
-from pys3.xml.list_buckets import ListBucketsResult, S3Bucket
+from pys3.xml_builder.list_buckets import ListBucketsResult, S3Bucket
 
 
 async def handle_list_buckets(root_folder: Folder) -> Response:
