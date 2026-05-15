@@ -8,10 +8,14 @@ The wrapper intercepts the two relevant operations:
   Telegram. The returned ``SentFileMessage`` list reflects ciphertext part
   sizes, which is what TGFS persists in its metadata.
 
-* :meth:`get` -- translates the requested *plaintext* range
-  ``[begin, end)`` into a *ciphertext* range, fetches the encrypted bytes
-  via the inner repository, decrypts each chunk, and emits the requested
-  plaintext slice. The on-disk header is read once per file and cached.
+* :meth:`get` -- detects per file whether the stored content carries a TGFS
+  encryption header. Encrypted files are decrypted on-the-fly (the on-disk
+  header is read once per file and cached); legacy plaintext files (no
+  ``"TGFS"`` magic at byte 0) are passed straight through the wrapper, so a
+  TGFS deployment that turns encryption on later can still read everything
+  it wrote before. New writes always go through the encryption path while
+  the wrapper is installed, so overwriting a plaintext file produces
+  ciphertext.
 
 Everything else (file_desc API, directory API, WebDAV) keeps working
 unchanged because the metadata still tracks parts by message id and size,
@@ -30,7 +34,7 @@ from tgfs.crypto.cipher import (
     chunk_to_ciphertext_offset,
     plaintext_offset_to_chunk,
 )
-from tgfs.crypto.header import HEADER_SIZE, FileHeader
+from tgfs.crypto.header import HEADER_SIZE, MAGIC, FileHeader, InvalidHeaderError
 from tgfs.crypto.kdf import derive_file_key
 from tgfs.crypto.stream import EncryptingFileMessage
 from tgfs.reqres import FileContent, SentFileMessage, UploadableFileMessage
@@ -50,25 +54,37 @@ _HEADER_CACHE_CAPACITY = 1024
 class _HeaderCache:
     """Trivial bounded FIFO cache keyed by file version id.
 
+    A cached value of ``None`` marks a legacy *plaintext* file -- one that
+    predates encryption and therefore must be passed through the inner repo
+    unchanged. Caching that decision is important: without it, every range
+    request would trigger a fresh header probe against Telegram.
+
     A full LRU would be marginally better, but FIFO is fine for read-mostly
     workloads and avoids pulling in another dependency.
     """
 
     def __init__(self, capacity: int = _HEADER_CACHE_CAPACITY) -> None:
         self._capacity = capacity
-        self._store: dict[str, tuple[FileHeader, bytes]] = {}
+        self._store: dict[str, Optional[tuple[FileHeader, bytes]]] = {}
         self._order: list[str] = []
 
-    def get(self, version_id: str) -> Optional[tuple[FileHeader, bytes]]:
-        return self._store.get(version_id)
+    def lookup(
+        self, version_id: str
+    ) -> tuple[bool, Optional[tuple[FileHeader, bytes]]]:
+        """Return ``(hit, entry)``. ``entry is None`` on hit means plaintext."""
+        if version_id in self._store:
+            return True, self._store[version_id]
+        return False, None
 
-    def put(self, version_id: str, header: FileHeader, file_key: bytes) -> None:
+    def put(
+        self, version_id: str, entry: Optional[tuple[FileHeader, bytes]]
+    ) -> None:
         if version_id in self._store:
             return
         if len(self._store) >= self._capacity:
             evict = self._order.pop(0)
             self._store.pop(evict, None)
-        self._store[version_id] = (header, file_key)
+        self._store[version_id] = entry
         self._order.append(version_id)
 
 
@@ -149,8 +165,14 @@ class EncryptingFileContentRepository(IFileContentRepository):
 
             return empty()
 
-        # Step 1: fetch and authenticate the header (60 B) once per file.
-        header, file_key = await self._load_header(fv, name)
+        # Step 1: detect whether this file is encrypted (TGFS magic at byte 0)
+        # or a legacy plaintext file. Plaintext files are passed straight
+        # through so reads keep working across an encryption-enabled boundary.
+        detected = await self._detect(fv, name)
+        if detected is None:
+            return await self._inner.get(fv, begin, end, name)
+
+        header, file_key = detected
         cipher = ChunkedAESGCM(
             file_key=file_key,
             file_salt=header.file_salt,
@@ -215,27 +237,46 @@ class EncryptingFileContentRepository(IFileContentRepository):
 
     # -- internals ---------------------------------------------------------
 
-    async def _load_header(
+    async def _detect(
         self, fv: "TGFSFileVersion", name: str
-    ) -> tuple[FileHeader, bytes]:
-        """Fetch + authenticate the file header, with caching."""
-        cached = self._cache.get(fv.id)
-        if cached is not None:
+    ) -> Optional[tuple[FileHeader, bytes]]:
+        """Probe the start of the file to decide between encrypted and legacy.
+
+        Returns the parsed and authenticated header (plus per-file key) for
+        encrypted files, or ``None`` for legacy plaintext files that should
+        be passed through to the inner repository unchanged.
+
+        Magic byte sniffing is the only signal used: if the first four bytes
+        are not ``"TGFS"`` the file is treated as plaintext. If the magic
+        matches but the header is malformed or its MAC does not authenticate,
+        we raise rather than silently falling back -- otherwise a wrong master
+        key would be indistinguishable from "this is just a plaintext file".
+        """
+        hit, cached = self._cache.lookup(fv.id)
+        if hit:
             return cached
 
-        # Fetch the first HEADER_SIZE bytes of ciphertext from the inner
-        # repository -- it knows how to read across Telegram part boundaries
-        # so we don't have to.
-        stream = await self._inner.get(fv, 0, HEADER_SIZE, name)
+        # Files shorter than the magic itself can't be encrypted by us.
+        if fv.size < len(MAGIC):
+            self._cache.put(fv.id, None)
+            return None
+
+        probe_end = min(HEADER_SIZE, fv.size)
+        stream = await self._inner.get(fv, 0, probe_end, name)
         buf = bytearray()
-        async for chunk in stream:
-            buf += chunk
-            if len(buf) >= HEADER_SIZE:
+        async for piece in stream:
+            buf += piece
+            if len(buf) >= probe_end:
                 break
+
+        if len(buf) < len(MAGIC) or bytes(buf[: len(MAGIC)]) != MAGIC:
+            self._cache.put(fv.id, None)
+            return None
+
         if len(buf) < HEADER_SIZE:
-            raise ValueError(
-                f"file '{name}' is too short to contain an encryption header "
-                f"({len(buf)} < {HEADER_SIZE} bytes)"
+            raise InvalidHeaderError(
+                f"file '{name}' starts with TGFS magic but is shorter than "
+                f"the encryption header ({len(buf)} < {HEADER_SIZE} bytes)"
             )
 
         raw_header = bytes(buf[:HEADER_SIZE])
@@ -246,8 +287,9 @@ class EncryptingFileContentRepository(IFileContentRepository):
         # refuse to decrypt anything.
         FileHeader.verify(raw_header, file_key)
 
-        self._cache.put(fv.id, header, file_key)
-        return header, file_key
+        entry = (header, file_key)
+        self._cache.put(fv.id, entry)
+        return entry
 
 
 def _plaintext_size_from_ciphertext(ciphertext_size: int, chunk_size: int) -> int:

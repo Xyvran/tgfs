@@ -21,7 +21,7 @@ import pytest
 
 from tgfs.core.repository.interface import IFileContentRepository
 from tgfs.crypto.cipher import CHUNK_OVERHEAD
-from tgfs.crypto.header import HEADER_SIZE
+from tgfs.crypto.header import HEADER_SIZE, InvalidHeaderError
 from tgfs.crypto.repository import EncryptingFileContentRepository
 from tgfs.reqres import (
     FileContent,
@@ -266,3 +266,134 @@ async def test_empty_file_round_trip() -> None:
     fv = await _save_and_get_fv(repo, b"")
     out = await _collect(await repo.get(fv, 0, -1, "test.bin"))
     assert out == b""
+
+
+# --- mixed mode: legacy plaintext + encrypted writes -----------------------
+
+
+def _seed_plaintext(repo: EncryptingFileContentRepository, data: bytes) -> _FakeFileVersion:
+    """Stuff a plaintext blob directly into the inner repo, as if it had
+    been written before encryption was enabled."""
+    inner: _InMemoryRepo = repo._inner  # type: ignore[assignment]
+    msg_id = inner._next_msg_id
+    inner._next_msg_id += 1
+    inner._files[msg_id] = data
+    return _FakeFileVersion(
+        id=f"plain-{msg_id}",
+        size=len(data),
+        message_ids=[msg_id],
+        part_sizes=[len(data)],
+    )
+
+
+async def test_read_plaintext_passthrough_full() -> None:
+    repo = _make_repo(chunk_size=4096)
+    plaintext = os.urandom(4096 * 3 + 500)
+    fv = _seed_plaintext(repo, plaintext)
+    out = await _collect(await repo.get(fv, 0, -1, "legacy.bin"))
+    assert out == plaintext
+
+
+@pytest.mark.parametrize(
+    "begin,end",
+    [
+        (0, 1),
+        (10, 200),
+        (4090, 4106),  # spans a would-be chunk boundary
+        (4096 * 2 + 50, 4096 * 6 - 50),
+        (1234, -1),
+    ],
+)
+async def test_read_plaintext_passthrough_ranges(begin: int, end: int) -> None:
+    repo = _make_repo(chunk_size=4096)
+    plaintext = os.urandom(4096 * 10)
+    fv = _seed_plaintext(repo, plaintext)
+    out = await _collect(await repo.get(fv, begin, end, "legacy.bin"))
+    expected = plaintext[begin:] if end < 0 else plaintext[begin:end]
+    assert out == expected
+
+
+async def test_read_plaintext_last_byte() -> None:
+    repo = _make_repo(chunk_size=4096)
+    plaintext = os.urandom(4096 * 3 + 100)
+    fv = _seed_plaintext(repo, plaintext)
+    out = await _collect(
+        await repo.get(fv, len(plaintext) - 1, len(plaintext), "legacy.bin")
+    )
+    assert out == plaintext[-1:]
+
+
+async def test_read_plaintext_shorter_than_header() -> None:
+    """A 10-byte legacy file must read back as plaintext, not error out."""
+    repo = _make_repo(chunk_size=4096)
+    plaintext = b"hello tgfs"
+    fv = _seed_plaintext(repo, plaintext)
+    out = await _collect(await repo.get(fv, 0, -1, "tiny.txt"))
+    assert out == plaintext
+
+
+async def test_read_plaintext_shorter_than_magic() -> None:
+    """Files with <4 bytes can't even hold the magic; treat as plaintext."""
+    repo = _make_repo(chunk_size=4096)
+    plaintext = b"hi"
+    fv = _seed_plaintext(repo, plaintext)
+    out = await _collect(await repo.get(fv, 0, -1, "tiny.txt"))
+    assert out == plaintext
+
+
+async def test_overwrite_plaintext_produces_ciphertext() -> None:
+    """Writing a new file under an encryption-enabled wrapper always
+    encrypts -- regardless of whether prior files in the repo are plaintext."""
+    repo = _make_repo(chunk_size=4096)
+    # Seed a plaintext file so the inner repo holds a mix.
+    _seed_plaintext(repo, b"old content from before encryption was enabled")
+
+    # New write through the wrapper.
+    new_plaintext = os.urandom(8192)
+    new_fv = await _save_and_get_fv(repo, new_plaintext)
+    inner: _InMemoryRepo = repo._inner  # type: ignore[assignment]
+    stored = inner._files[new_fv.message_ids[0]]
+    assert stored[:4] == b"TGFS", "new write must start with TGFS magic"
+    assert stored != new_plaintext
+
+    # And it round-trips through the wrapper.
+    out = await _collect(await repo.get(new_fv, 0, -1, "new.bin"))
+    assert out == new_plaintext
+
+
+async def test_plaintext_with_accidental_tgfs_prefix_fails_loudly() -> None:
+    """A plaintext file that happens to start with ``TGFS`` and looks like a
+    header parse target must NOT be silently treated as plaintext: the MAC
+    will fail and we must surface the error so a real key mismatch is never
+    masked.
+    """
+    repo = _make_repo(chunk_size=4096)
+    # Construct a 60-byte blob whose magic + version + algorithm + chunk_size
+    # parse OK, but the MAC is garbage. parse() succeeds; verify() raises.
+    import struct as _struct
+
+    body = _struct.pack(">4sHHI32s", b"TGFS", 1, 1, 4096, b"\x00" * 32)
+    fake = body + b"\xff" * 16  # wrong MAC
+    fv = _seed_plaintext(repo, fake + b"some more data")
+    with pytest.raises(InvalidHeaderError):
+        await _collect(await repo.get(fv, 0, -1, "ambiguous.bin"))
+
+
+async def test_plaintext_with_tgfs_prefix_short_fails_loudly() -> None:
+    """Magic match but truncated below HEADER_SIZE: surface as error."""
+    repo = _make_repo(chunk_size=4096)
+    fv = _seed_plaintext(repo, b"TGFS" + b"\x00" * 10)  # 14 bytes total
+    with pytest.raises(InvalidHeaderError):
+        await _collect(await repo.get(fv, 0, -1, "short.bin"))
+
+
+async def test_detection_cached_across_calls() -> None:
+    """A second read of the same plaintext file must not re-probe the inner."""
+    repo = _make_repo(chunk_size=4096)
+    fv = _seed_plaintext(repo, os.urandom(1024))
+
+    # First read populates the cache.
+    await _collect(await repo.get(fv, 0, -1, "legacy.bin"))
+
+    hit, entry = repo._cache.lookup(fv.id)
+    assert hit and entry is None  # cached as plaintext
