@@ -21,11 +21,13 @@ class Client:
         message_api: MessageApi,
         file_api: FileApi,
         dir_api: DirectoryApi,
+        fc_repo: IFileContentRepository,
     ):
         self.name = name
         self.message_api = message_api
         self.file_api = file_api
         self.dir_api = dir_api
+        self.fc_repo = fc_repo
 
     @classmethod
     async def create(
@@ -91,6 +93,7 @@ class Client:
             message_api=message_api,
             file_api=file_api,
             dir_api=dir_api,
+            fc_repo=fc_repo,
         )
 
 

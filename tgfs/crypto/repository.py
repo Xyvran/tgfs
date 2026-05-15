@@ -180,14 +180,15 @@ class EncryptingFileContentRepository(IFileContentRepository):
         )
 
         # Step 2: translate the requested plaintext range to a ciphertext
-        # range. ``end`` follows the same convention as the inner repo:
+        # range. ``end`` follows the codebase-wide convention: HTTP-Range
+        # style INCLUSIVE end (e.g. ``begin=0, end=15`` means 16 bytes), and
         # ``end < 0`` means "to the end of the file".
         plaintext_total = _plaintext_size_from_ciphertext(
             fv.size, header.chunk_size
         )
-        if end < 0 or end > plaintext_total:
-            end = plaintext_total
-        if begin >= end:
+        if end < 0 or end >= plaintext_total:
+            end = plaintext_total - 1
+        if begin > end or begin >= plaintext_total:
 
             async def empty():
                 if False:
@@ -198,42 +199,62 @@ class EncryptingFileContentRepository(IFileContentRepository):
         start_chunk, start_offset_in_chunk = plaintext_offset_to_chunk(
             begin, header.chunk_size
         )
-        # ``end`` is exclusive in TGFS's convention, so the last chunk we
-        # need is the one containing byte ``end - 1``.
-        last_chunk, _ = plaintext_offset_to_chunk(end - 1, header.chunk_size)
+        # ``end`` is inclusive, so the last chunk we need is the one
+        # containing byte ``end`` itself.
+        last_chunk, _ = plaintext_offset_to_chunk(end, header.chunk_size)
         n_chunks = last_chunk - start_chunk + 1
 
         ct_begin = HEADER_SIZE + chunk_to_ciphertext_offset(
             start_chunk, header.chunk_size
         )
-        ct_end = HEADER_SIZE + chunk_to_ciphertext_offset(
+        # Exclusive end of the ciphertext slice we want to read.
+        ct_end_excl = HEADER_SIZE + chunk_to_ciphertext_offset(
             last_chunk + 1, header.chunk_size
         )
         # Clamp to the actual on-disk file size: the final chunk is typically
         # short (plaintext mod chunk_size), so its on-wire size is less than
         # ``chunk_size + CHUNK_OVERHEAD``.
-        ct_end = min(ct_end, fv.size)
+        ct_end_excl = min(ct_end_excl, fv.size)
+        # ``IFileContentRepository.get`` expects an INCLUSIVE end (matching
+        # HTTP Range and the underlying Telegram download_file API), so
+        # convert here. Without this conversion the inner stack reads one
+        # extra ciphertext byte at a chunk boundary, which makes the AES-GCM
+        # tag check on the following chunk fail.
+        ct_end_inclusive = ct_end_excl - 1
 
         logger.debug(
-            "decrypt range plaintext=[%d,%d) chunks=[%d,%d] ciphertext=[%d,%d)",
+            "decrypt range plaintext=[%d,%d] chunks=[%d,%d] ciphertext=[%d,%d]",
             begin,
             end,
             start_chunk,
             last_chunk,
             ct_begin,
-            ct_end,
+            ct_end_inclusive,
         )
 
-        inner_stream = await self._inner.get(fv, ct_begin, ct_end, name)
+        inner_stream = await self._inner.get(
+            fv, ct_begin, ct_end_inclusive, name
+        )
         return _decrypting_stream(
             inner_stream,
             cipher,
             start_chunk=start_chunk,
             n_chunks=n_chunks,
             trim_head=start_offset_in_chunk,
-            trim_total=end - begin,
+            trim_total=end - begin + 1,
             chunk_size=header.chunk_size,
         )
+
+    async def content_length(self, fv: "TGFSFileVersion") -> int:
+        if fv.size <= 0:
+            return 0
+        # ``_detect`` already caches per file, so the second call from a HEAD
+        # request or a Content-Range computation is free.
+        detected = await self._detect(fv, "")
+        if detected is None:
+            return fv.size
+        header, _ = detected
+        return _plaintext_size_from_ciphertext(fv.size, header.chunk_size)
 
     # -- internals ---------------------------------------------------------
 
@@ -261,12 +282,14 @@ class EncryptingFileContentRepository(IFileContentRepository):
             self._cache.put(fv.id, None)
             return None
 
-        probe_end = min(HEADER_SIZE, fv.size)
-        stream = await self._inner.get(fv, 0, probe_end, name)
+        probe_target = min(HEADER_SIZE, fv.size)
+        # Inner ``get`` uses inclusive ends, so the last byte index is one
+        # less than the count.
+        stream = await self._inner.get(fv, 0, probe_target - 1, name)
         buf = bytearray()
         async for piece in stream:
             buf += piece
-            if len(buf) >= probe_end:
+            if len(buf) >= probe_target:
                 break
 
         if len(buf) < len(MAGIC) or bytes(buf[: len(MAGIC)]) != MAGIC:
