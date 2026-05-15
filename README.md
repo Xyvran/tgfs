@@ -29,6 +29,40 @@ Refer to the [wiki page](https://github.com/TheodoreKrypton/tgfs/wiki/TGFS-Wiki)
 * Importing files that are already on Telegram (Only via the Telegram Mini App)
 * File size is unlimited (larger files are chunked into parts but appear as a single file to the user)
 * Live streaming of videos
+* **Optional at-rest encryption** (AES-256-GCM, see below)
+
+
+## At-rest encryption
+
+When ``encryption.enabled: true`` is set in ``config.yaml``, every byte
+TGFS uploads to Telegram is encrypted client-side. The Telegram channel and
+the metadata repository never see plaintext.
+
+* **Cipher:** AES-256-GCM in 64 KiB chunks, each with its own nonce + auth tag.
+  Random-access decryption (HTTP Range requests, video streaming) keeps working.
+* **Keys:** the master key is derived from a passphrase via Argon2id at startup.
+  Per-file keys are derived via HKDF-SHA256 from the master key and a 32-byte
+  random salt stored in the file header.
+* **Header:** each encrypted file starts with a self-describing 60-byte header
+  embedded *inline* in the first Telegram message, so a file can be decrypted
+  from the channel even if the TGFS metadata store is lost.
+* **Tamper detection:** every chunk has its own GCM tag plus an HMAC on the
+  header, so flipped bits or chunk reordering are caught before plaintext is
+  returned.
+
+Set up:
+
+```yaml
+tgfs:
+  encryption:
+    enabled: true
+    passphrase_env: TGFS_MASTER_PASSPHRASE
+    master_salt_file: master.salt
+    chunk_size: 65536
+```
+
+Back up ``master.salt`` together with your passphrase -- losing either makes
+decryption impossible. See ``demo-config.yaml`` for the full set of options.
 
 
 ## Demo Server
