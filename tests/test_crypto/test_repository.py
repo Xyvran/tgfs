@@ -93,22 +93,25 @@ class _InMemoryRepo(IFileContentRepository):
         self, fv, begin: int, end: int, name: str
     ) -> FileContent:
         # Single-part files only in this fake, so use the first message id.
+        # ``end`` follows the codebase-wide INCLUSIVE convention (matches the
+        # real Telegram ``download_file`` API: bytes_to_read = end - begin + 1).
         ciphertext = self._files[fv.message_ids[0]]
         if end < 0:
-            end = len(ciphertext)
+            end = len(ciphertext) - 1
+        limit = end + 1  # exclusive bound for slicing
 
         async def stream():
             # Emit in small, oddly-sized pieces to make sure the decrypting
             # consumer handles arbitrary boundaries.
             i = begin
             for step in (3, 17, 1024, 8192):
-                if i >= end:
+                if i >= limit:
                     break
-                slice_end = min(i + step, end)
+                slice_end = min(i + step, limit)
                 yield ciphertext[i:slice_end]
                 i = slice_end
-            if i < end:
-                yield ciphertext[i:end]
+            if i < limit:
+                yield ciphertext[i:limit]
 
         return stream()
 
@@ -186,7 +189,7 @@ async def test_range_request_within_first_chunk() -> None:
     repo = _make_repo(chunk_size=4096)
     plaintext = os.urandom(4096 * 5)
     fv = await _save_and_get_fv(repo, plaintext)
-    out = await _collect(await repo.get(fv, 100, 200, "test.bin"))
+    out = await _collect(await repo.get(fv, 100, 199, "test.bin"))
     assert out == plaintext[100:200]
 
 
@@ -194,8 +197,8 @@ async def test_range_request_spanning_chunk_boundary() -> None:
     repo = _make_repo(chunk_size=4096)
     plaintext = os.urandom(4096 * 5)
     fv = await _save_and_get_fv(repo, plaintext)
-    # 4090..4106 spans the boundary between chunk 0 and chunk 1.
-    out = await _collect(await repo.get(fv, 4090, 4106, "test.bin"))
+    # 4090..4105 (inclusive) spans the boundary between chunk 0 and chunk 1.
+    out = await _collect(await repo.get(fv, 4090, 4105, "test.bin"))
     assert out == plaintext[4090:4106]
 
 
@@ -203,10 +206,10 @@ async def test_range_request_across_many_chunks() -> None:
     repo = _make_repo(chunk_size=4096)
     plaintext = os.urandom(4096 * 10)
     fv = await _save_and_get_fv(repo, plaintext)
-    # Pick a range that touches 4 chunks.
-    begin, end = 4096 * 2 + 50, 4096 * 6 - 50
-    out = await _collect(await repo.get(fv, begin, end, "test.bin"))
-    assert out == plaintext[begin:end]
+    # Pick a range that touches 4 chunks. ``end`` is inclusive.
+    begin, slice_end = 4096 * 2 + 50, 4096 * 6 - 50
+    out = await _collect(await repo.get(fv, begin, slice_end - 1, "test.bin"))
+    assert out == plaintext[begin:slice_end]
 
 
 async def test_range_request_to_end_of_file() -> None:
@@ -222,7 +225,7 @@ async def test_range_request_last_byte() -> None:
     plaintext = os.urandom(4096 * 3 + 100)
     fv = await _save_and_get_fv(repo, plaintext)
     out = await _collect(
-        await repo.get(fv, len(plaintext) - 1, len(plaintext), "test.bin")
+        await repo.get(fv, len(plaintext) - 1, len(plaintext) - 1, "test.bin")
     )
     assert out == plaintext[-1:]
 
@@ -297,10 +300,10 @@ async def test_read_plaintext_passthrough_full() -> None:
 @pytest.mark.parametrize(
     "begin,end",
     [
-        (0, 1),
-        (10, 200),
-        (4090, 4106),  # spans a would-be chunk boundary
-        (4096 * 2 + 50, 4096 * 6 - 50),
+        (0, 0),
+        (10, 199),
+        (4090, 4105),  # spans a would-be chunk boundary
+        (4096 * 2 + 50, 4096 * 6 - 50 - 1),
         (1234, -1),
     ],
 )
@@ -309,7 +312,7 @@ async def test_read_plaintext_passthrough_ranges(begin: int, end: int) -> None:
     plaintext = os.urandom(4096 * 10)
     fv = _seed_plaintext(repo, plaintext)
     out = await _collect(await repo.get(fv, begin, end, "legacy.bin"))
-    expected = plaintext[begin:] if end < 0 else plaintext[begin:end]
+    expected = plaintext[begin:] if end < 0 else plaintext[begin:end + 1]
     assert out == expected
 
 
@@ -318,7 +321,7 @@ async def test_read_plaintext_last_byte() -> None:
     plaintext = os.urandom(4096 * 3 + 100)
     fv = _seed_plaintext(repo, plaintext)
     out = await _collect(
-        await repo.get(fv, len(plaintext) - 1, len(plaintext), "legacy.bin")
+        await repo.get(fv, len(plaintext) - 1, len(plaintext) - 1, "legacy.bin")
     )
     assert out == plaintext[-1:]
 
