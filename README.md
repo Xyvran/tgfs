@@ -61,8 +61,35 @@ tgfs:
     chunk_size: 65536
 ```
 
-Back up ``master.salt`` together with your passphrase -- losing either makes
-decryption impossible. See ``demo-config.yaml`` for the full set of options.
+### Master salt
+
+The Argon2 master salt is the value referenced by ``master_salt_file``. It is
+**not** secret, but it is required to re-derive the master key from your
+passphrase, so it must survive container/host rebuilds.
+
+* **Auto-generated on first start.** If ``master_salt_file`` does not exist
+  when TGFS boots, 16 random bytes are written there via
+  ``secrets.token_bytes`` and the file is ``chmod 0600``'d. No manual step is
+  required.
+* **Path resolution.** The value is resolved relative to ``TGFS_DATA_DIR``
+  (defaults to ``~/.tgfs``), so ``master_salt_file: master.salt`` lands at
+  ``~/.tgfs/master.salt`` unless you override the data dir.
+* **Manual creation (optional).** If you prefer to seed the salt yourself --
+  e.g. to push it into a secret manager before the first start -- generate at
+  least 8 bytes (16 recommended) and drop them at the configured path:
+
+  ```bash
+  mkdir -p ~/.tgfs
+  head -c 16 /dev/urandom > ~/.tgfs/master.salt
+  chmod 600 ~/.tgfs/master.salt
+  ```
+
+* **Back it up, never rotate it in place.** Losing the salt (or replacing it
+  with fresh random bytes) makes every previously uploaded file unreadable,
+  even with the correct passphrase. Back ``master.salt`` up alongside your
+  passphrase and your metadata.
+
+See ``demo-config.yaml`` for the full set of options.
 
 
 ## Demo Server
