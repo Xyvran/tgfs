@@ -49,6 +49,12 @@ the metadata repository never see plaintext.
 * **Tamper detection:** every chunk has its own GCM tag plus an HMAC on the
   header, so flipped bits or chunk reordering are caught before plaintext is
   returned.
+* **Optional name obfuscation:** with ``encrypt_names: true`` the Telegram
+  document name of every new upload (and the pinned metadata blob) is
+  replaced with an AES-GCM ciphertext token. The plaintext names stay
+  inside the (already encrypted) metadata, so WebDAV and the manager UI
+  are unaffected. Only new uploads are obfuscated; pre-existing files keep
+  their original document name in Telegram.
 
 Set up:
 
@@ -56,6 +62,7 @@ Set up:
 tgfs:
   encryption:
     enabled: true
+    encrypt_names: true  # optional, hide file/dir names from channel observers
     passphrase_env: TGFS_MASTER_PASSPHRASE
     master_salt_file: master.salt
     chunk_size: 65536
