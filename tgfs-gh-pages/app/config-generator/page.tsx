@@ -25,6 +25,10 @@ import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { BotTokenField } from "./components/BotTokenField";
 import { ChannelField } from "./components/ChannelField";
 import { ConfigTextField } from "./components/ConfigTextField";
+import {
+  EncryptionConfig,
+  EncryptionField,
+} from "./components/EncryptionField";
 import { FieldRow } from "./components/FieldRow";
 import { FormSection } from "./components/FormSection";
 import { UserField } from "./components/UserField";
@@ -71,6 +75,7 @@ interface ConfigData {
       host: string;
       port: number;
     };
+    encryption: EncryptionConfig;
   };
 }
 
@@ -88,6 +93,7 @@ type ConfigUpdatePaths = {
   "tgfs.jwt.life": number;
   "tgfs.server.host": string;
   "tgfs.server.port": number;
+  "tgfs.encryption": EncryptionConfig;
 };
 
 const generateRandomSecret = (): string => {
@@ -148,6 +154,15 @@ export default function ConfigGenerator() {
         host: "0.0.0.0",
         port: 1900,
       },
+      encryption: {
+        enabled: false,
+        passphrase_source: "passphrase_env",
+        passphrase: "",
+        passphrase_env: "TGFS_MASTER_PASSPHRASE",
+        passphrase_file: "secrets/master.passphrase",
+        master_salt_file: "master.salt",
+        chunk_size: 65536,
+      },
     },
   });
 
@@ -185,6 +200,8 @@ export default function ConfigGenerator() {
         newConfig.tgfs.server.host = value as string;
       } else if (path === "tgfs.server.port") {
         newConfig.tgfs.server.port = value as number;
+      } else if (path === "tgfs.encryption") {
+        newConfig.tgfs.encryption = value as EncryptionConfig;
       }
 
       setConfig(newConfig);
@@ -279,6 +296,31 @@ export default function ConfigGenerator() {
         jwt: config.tgfs.jwt,
         metadata,
         server: config.tgfs.server,
+        encryption: (() => {
+          const enc = config.tgfs.encryption;
+          const block: {
+            enabled: boolean;
+            passphrase?: string;
+            passphrase_env?: string;
+            passphrase_file?: string;
+            master_salt_file: string;
+            chunk_size: number;
+          } = {
+            enabled: enc.enabled,
+            master_salt_file: enc.master_salt_file,
+            chunk_size: enc.chunk_size,
+          };
+          if (enc.enabled) {
+            if (enc.passphrase_source === "passphrase") {
+              block.passphrase = enc.passphrase;
+            } else if (enc.passphrase_source === "passphrase_env") {
+              block.passphrase_env = enc.passphrase_env;
+            } else if (enc.passphrase_source === "passphrase_file") {
+              block.passphrase_file = enc.passphrase_file;
+            }
+          }
+          return block;
+        })(),
       },
     };
 
@@ -705,6 +747,23 @@ export default function ConfigGenerator() {
                 </a>
                 {")"}.
               </Typography>
+            </FormSection>
+
+            <FormSection title="Encryption (Optional)">
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                At-rest encryption with AES-256-GCM. When enabled, every file
+                is encrypted client-side before being uploaded; the Telegram
+                channel only ever sees ciphertext plus a public per-file salt.
+              </Typography>
+              <EncryptionField
+                config={config.tgfs.encryption}
+                onUpdate={(field, value) =>
+                  updateConfig("tgfs.encryption", {
+                    ...config.tgfs.encryption,
+                    [field]: value,
+                  })
+                }
+              />
             </FormSection>
           </Paper>
         </Box>
