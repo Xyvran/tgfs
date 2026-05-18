@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 from tgfs.crypto.cipher import (
     ChunkedAESGCM,
@@ -29,7 +28,6 @@ from tgfs.crypto.cipher import (
 )
 from tgfs.crypto.header import HEADER_SIZE, FileHeader
 from tgfs.reqres import FileTags, UploadableFileMessage
-from tgfs.tasks.integrations import TaskTracker
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +73,8 @@ class EncryptingFileMessage(UploadableFileMessage):
             chunk_size=header.chunk_size,
         )
         header_bytes = header.serialize(file_key)
-        assert len(header_bytes) == HEADER_SIZE
+        if len(header_bytes) != HEADER_SIZE:
+            raise RuntimeError("serialized header has unexpected size")
 
         plaintext_size = inner.get_size()
         ciphertext_size = HEADER_SIZE + ciphertext_size_for_plaintext(
