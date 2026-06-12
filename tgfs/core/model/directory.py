@@ -6,7 +6,7 @@ from tgfs.errors import FileOrDirectoryAlreadyExists, FileOrDirectoryDoesNotExis
 from tgfs.utils.time import FIRST_DAY_OF_EPOCH, ts
 
 from .common import validate_name
-from .serialized import TGFSDirectorySerialized
+from .serialized import TGFSDirectorySerialized, TGFSFileRefSerialized
 
 
 @dataclass
@@ -15,8 +15,8 @@ class TGFSFileRef:
     name: str
     location: "TGFSDirectory" = field(repr=False)
 
-    def to_dict(self) -> dict:
-        return dict(
+    def to_dict(self) -> TGFSFileRefSerialized:
+        return TGFSFileRefSerialized(
             type="FR",
             messageId=self.message_id,
             name=self.name,
@@ -49,8 +49,8 @@ class TGFSDirectory:
     def _touch_modified(self) -> None:
         self.modified_at = datetime.datetime.now()
 
-    def to_dict(self) -> dict:
-        return dict(
+    def to_dict(self) -> TGFSDirectorySerialized:
+        return TGFSDirectorySerialized(
             type="D",
             name=self.name,
             createdAt=self.created_at_timestamp,
@@ -63,8 +63,7 @@ class TGFSDirectory:
     def from_dict(
         data: TGFSDirectorySerialized, parent: Optional["TGFSDirectory"] = None
     ) -> "TGFSDirectory":
-        def _read_ts(key: str) -> datetime.datetime:
-            value = data.get(key, 0) or 0
+        def _read_ts(value: int) -> datetime.datetime:
             if value > 0:
                 return datetime.datetime.fromtimestamp(value / 1000)
             return FIRST_DAY_OF_EPOCH
@@ -74,8 +73,8 @@ class TGFSDirectory:
             parent=parent,
             children=[],
             files=[],
-            created_at=_read_ts("createdAt"),
-            modified_at=_read_ts("modifiedAt"),
+            created_at=_read_ts(data.get("createdAt", 0) or 0),
+            modified_at=_read_ts(data.get("modifiedAt", 0) or 0),
         )
 
         if data["files"]:

@@ -68,7 +68,8 @@ class Algorithm(enum.IntEnum):
 # Splitting the format keeps the MAC computation explicit and easy to audit.
 _BODY_FORMAT = f">4sHHI{FILE_SALT_SIZE}s"
 _BODY_SIZE = struct.calcsize(_BODY_FORMAT)
-assert _BODY_SIZE + HEADER_MAC_SIZE == HEADER_SIZE, "header layout mismatch"
+if _BODY_SIZE + HEADER_MAC_SIZE != HEADER_SIZE:
+    raise RuntimeError("header layout mismatch")
 
 
 class InvalidHeaderError(ValueError):
