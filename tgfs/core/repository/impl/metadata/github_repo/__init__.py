@@ -4,7 +4,6 @@ from typing import Optional
 
 from github import Github
 from github.ContentFile import ContentFile
-from github.GithubException import GithubException
 
 from tgfs.config import GithubRepoConfig
 from tgfs.core.model import TGFSDirectory, TGFSMetadata
@@ -64,7 +63,9 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
         try:
             commits = self._ghc.repo.get_commits(sha=self._ghc.commit, path=path)
             return commits[0].commit.committer.date
-        except (IndexError, GithubException) as ex:
+        except Exception as ex:
+            # Best-effort enrichment only: missing history, an API error, or any
+            # unexpected response must never abort the directory load.
             logger.debug(f"No commit history for {path}: {ex}")
             return None
 

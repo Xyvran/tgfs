@@ -1,3 +1,5 @@
+import datetime
+
 import pytest
 from unittest.mock import Mock, MagicMock, patch
 from typing import List
@@ -161,6 +163,40 @@ class TestGithubRepoMetadataRepository:
         assert len(sub_dir.files) == 1
         assert sub_dir.files[0].name == "image"
         assert sub_dir.files[0].message_id == 456
+
+    @patch("tgfs.core.repository.impl.metadata.github_repo.Github")
+    def test_build_directory_structure_restores_timestamps_from_commits(
+        self, mock_github_class, mock_github_config
+    ):
+        """Directory created/modified dates are recovered from git history."""
+        mock_github_instance = Mock(spec=Github)
+        mock_repo = Mock(spec=Repository)
+        mock_github_instance.get_repo.return_value = mock_repo
+        mock_github_class.return_value = mock_github_instance
+
+        subdir = Mock(spec=ContentFile)
+        subdir.name = "Serien"
+        subdir.type = "dir"
+        subdir.path = "Serien"
+
+        mock_repo.get_contents.side_effect = [
+            [subdir],  # root contents
+            [],  # subdir contents
+        ]
+
+        commit_date = datetime.datetime(
+            2024, 3, 1, 12, 0, tzinfo=datetime.timezone.utc
+        )
+        commit = Mock()
+        commit.commit.committer.date = commit_date
+        mock_repo.get_commits.return_value = [commit]
+
+        repository = GithubRepoMetadataRepository(mock_github_config)
+        root_dir = repository._build_directory_structure()
+
+        sub_dir = root_dir.children[0]
+        assert sub_dir.created_at == commit_date
+        assert sub_dir.modified_at == commit_date
 
     @patch("tgfs.core.repository.impl.metadata.github_repo.Github")
     def test_build_directory_structure_with_gitkeep_ignored(
