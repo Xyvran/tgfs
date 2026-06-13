@@ -77,9 +77,17 @@ class EncryptionConfig:
     ``master_salt_file`` stores the 16-byte master salt produced on the
     very first run. Back this up alongside your TGFS metadata -- without it
     the master key cannot be re-derived even with the correct passphrase.
+
+    ``encrypt_names`` additionally replaces the Telegram-visible document
+    name (and the pinned metadata document name) with an AES-GCM
+    ciphertext blob, so a passive observer of the channel cannot read
+    file or directory names from the document metadata. The plaintext
+    name is still stored inside the TGFS metadata.json, which is itself
+    encrypted at rest, so the WebDAV / manager UI is unaffected.
     """
 
     enabled: bool
+    encrypt_names: bool
     passphrase: Optional[str]
     passphrase_env: Optional[str]
     passphrase_file: Optional[str]
@@ -91,6 +99,7 @@ class EncryptionConfig:
         if not data:
             return cls(
                 enabled=False,
+                encrypt_names=False,
                 passphrase=None,
                 passphrase_env=None,
                 passphrase_file=None,
@@ -99,6 +108,7 @@ class EncryptionConfig:
             )
         return cls(
             enabled=bool(data.get("enabled", False)),
+            encrypt_names=bool(data.get("encrypt_names", False)),
             passphrase=data.get("passphrase"),
             passphrase_env=data.get("passphrase_env"),
             passphrase_file=(

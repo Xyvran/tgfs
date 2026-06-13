@@ -120,11 +120,16 @@ class _InMemoryRepo(IFileContentRepository):
         return message_id
 
 
-def _make_repo(master_key: bytes = b"\x77" * 32, chunk_size: int = 4096):
+def _make_repo(
+    master_key: bytes = b"\x77" * 32,
+    chunk_size: int = 4096,
+    encrypt_names: bool = False,
+):
     return EncryptingFileContentRepository(
         _InMemoryRepo(),
         master_key=master_key,
         chunk_size=chunk_size,
+        encrypt_names=encrypt_names,
     )
 
 
@@ -388,6 +393,141 @@ async def test_plaintext_with_tgfs_prefix_short_fails_loudly() -> None:
     fv = _seed_plaintext(repo, b"TGFS" + b"\x00" * 10)  # 14 bytes total
     with pytest.raises(InvalidHeaderError):
         await _collect(await repo.get(fv, 0, -1, "short.bin"))
+
+
+async def test_encrypt_names_replaces_name_passed_to_inner_save() -> None:
+    """When ``encrypt_names`` is on, the inner repo must never receive the
+    plaintext document name -- only the obfuscated form."""
+    from tgfs.crypto.names import NAME_PREFIX, derive_name_key, decrypt_name
+
+    repo = _make_repo(encrypt_names=True)
+    inner: _InMemoryRepo = repo._inner  # type: ignore[assignment]
+
+    # Intercept the name the inner repo would see for the save().
+    seen: list[str] = []
+    original_save = inner.save
+
+    async def spy_save(file_msg):
+        seen.append(file_msg.name)
+        return await original_save(file_msg)
+
+    inner.save = spy_save  # type: ignore[assignment]
+
+    file_msg = FileMessageFromBuffer.new(buffer=b"hello", name="report.pdf")
+    await repo.save(file_msg)
+
+    assert seen, "inner save was not called"
+    assert seen[0].startswith(NAME_PREFIX)
+    assert "report.pdf" not in seen[0]
+    # The encrypted name is decipherable with the same master-key-derived
+    # name key, so an operator with the key can still recover the plaintext.
+    name_key = derive_name_key(b"\x77" * 32)
+    assert decrypt_name(name_key, seen[0]) == "report.pdf"
+
+
+async def test_encrypt_names_replaces_name_passed_to_inner_update() -> None:
+    """``update`` is the path used by the metadata layer to refresh the
+    pinned metadata.json -- its document name must also be obfuscated."""
+    from tgfs.crypto.names import NAME_PREFIX
+
+    repo = _make_repo(encrypt_names=True)
+    inner: _InMemoryRepo = repo._inner  # type: ignore[assignment]
+
+    # Seed a message id we can target with update().
+    fv = await _save_and_get_fv(repo, b"original metadata")
+    msg_id = fv.message_ids[0]
+
+    seen: list[str] = []
+    original_update = inner.update
+
+    async def spy_update(message_id, buffer, name):
+        seen.append(name)
+        return await original_update(message_id, buffer, name)
+
+    inner.update = spy_update  # type: ignore[assignment]
+
+    await repo.update(msg_id, b'{"updated": true}', "metadata.json")
+    assert seen and seen[0].startswith(NAME_PREFIX)
+    assert "metadata.json" not in seen[0]
+
+
+async def test_encrypt_names_disabled_leaves_name_alone() -> None:
+    """Default behavior (``encrypt_names=False``) must NOT mutate the
+    document name -- existing deployments depend on this."""
+    repo = _make_repo(encrypt_names=False)
+    inner: _InMemoryRepo = repo._inner  # type: ignore[assignment]
+
+    seen: list[str] = []
+    original_save = inner.save
+
+    async def spy_save(file_msg):
+        seen.append(file_msg.name)
+        return await original_save(file_msg)
+
+    inner.save = spy_save  # type: ignore[assignment]
+    await repo.save(FileMessageFromBuffer.new(buffer=b"hi", name="report.pdf"))
+
+    assert seen == ["report.pdf"]
+
+
+async def test_encrypt_names_consistent_across_multipart_split() -> None:
+    """A large upload that gets split into ``[partN]<name>`` documents must
+    keep the SAME encrypted base name across every part, so a single
+    file's parts stay correlated by message_id (and by the consistent
+    encrypted name) the same way they would for plaintext uploads.
+
+    We simulate the real ``TGMsgFileContentRepository.save`` loop, which
+    captures the base name once and then prefixes ``[partN]`` per part.
+    """
+    from tgfs.crypto.names import NAME_PREFIX, decrypt_name, derive_name_key
+
+    repo = _make_repo(encrypt_names=True)
+    inner: _InMemoryRepo = repo._inner  # type: ignore[assignment]
+
+    captured: list[str] = []
+
+    async def multipart_save(file_msg):
+        # Mirror the partition + rename loop in
+        # ``tgfs.core.repository.impl.file_content.TGMsgFileContentRepository``.
+        base = file_msg.name or "unnamed"
+        total = file_msg.get_size()
+        # Three artificial parts; the size split is irrelevant for the
+        # name-encryption invariant, which is what we're asserting.
+        for i in range(3):
+            file_msg.name = f"[part{i + 1}]{base}"
+            captured.append(file_msg.name)
+        return [SentFileMessage(message_id=9000 + i, size=total // 3) for i in range(3)]
+
+    inner.save = multipart_save  # type: ignore[assignment]
+
+    await repo.save(FileMessageFromBuffer.new(buffer=b"x" * 1024, name="big.mkv"))
+
+    assert len(captured) == 3
+    # Each part name has the form "[partN]TGFS1_<base64>".
+    bases = []
+    for i, part_name in enumerate(captured, start=1):
+        assert part_name.startswith(f"[part{i}]")
+        body = part_name[len(f"[part{i}]") :]
+        assert body.startswith(NAME_PREFIX)
+        bases.append(body)
+    # Same encrypted base across all parts (a single encryption call up
+    # front, then the inner repo just prepends ``[partN]``).
+    assert len(set(bases)) == 1
+    # And the base actually decrypts back to the original filename.
+    name_key = derive_name_key(b"\x77" * 32)
+    assert decrypt_name(name_key, bases[0]) == "big.mkv"
+
+
+async def test_encrypt_names_does_not_affect_content_round_trip() -> None:
+    """The name-encryption option is purely cosmetic on the Telegram side;
+    content encryption and decryption must round-trip unchanged."""
+    import os
+
+    repo = _make_repo(chunk_size=4096, encrypt_names=True)
+    plaintext = os.urandom(4096 * 3 + 17)
+    fv = await _save_and_get_fv(repo, plaintext)
+    out = await _collect(await repo.get(fv, 0, -1, "test.bin"))
+    assert out == plaintext
 
 
 async def test_detection_cached_across_calls() -> None:

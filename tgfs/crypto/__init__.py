@@ -30,10 +30,14 @@ it explicitly when needed:
 from tgfs.crypto.cipher import ChunkedAESGCM
 from tgfs.crypto.header import FileHeader
 from tgfs.crypto.kdf import derive_file_key, derive_master_key
+from tgfs.crypto.names import decrypt_name, derive_name_key, encrypt_name
 
 __all__ = [
     "ChunkedAESGCM",
     "FileHeader",
+    "decrypt_name",
     "derive_file_key",
     "derive_master_key",
+    "derive_name_key",
+    "encrypt_name",
 ]
