@@ -221,6 +221,54 @@ class TestGithubRepoMetadataRepository:
         assert sub_dir.modified_at == commit_date
 
     @patch("tgfs.core.repository.impl.metadata.github_repo.Github")
+    def test_reads_encrypted_and_legacy_names(
+        self, mock_github_class, mock_github_config
+    ):
+        """Encrypted dir/file names are decrypted; plaintext ones pass through."""
+        from tgfs.crypto.path_names import (
+            derive_path_name_key,
+            encrypt_path_name,
+        )
+
+        key = derive_path_name_key(b"\x42" * 32)
+
+        mock_github_instance = Mock(spec=Github)
+        mock_repo = Mock(spec=Repository)
+        mock_github_instance.get_repo.return_value = mock_repo
+        mock_github_class.return_value = mock_github_instance
+
+        enc_dir = encrypt_path_name(key, "Filme")
+        enc_file = encrypt_path_name(key, "movie.mp4")
+
+        d = Mock(spec=ContentFile)
+        d.name, d.type, d.path = enc_dir, "dir", enc_dir
+        legacy = Mock(spec=ContentFile)
+        legacy.name, legacy.type, legacy.path = "legacy.7", "file", "legacy.7"
+        inner = Mock(spec=ContentFile)
+        inner.name = f"{enc_file}.39"
+        inner.type = "file"
+        inner.path = f"{enc_dir}/{enc_file}.39"
+
+        mock_repo.get_contents.side_effect = [
+            [d, legacy],  # root
+            [inner],  # inside Filme
+        ]
+
+        repository = GithubRepoMetadataRepository(
+            mock_github_config, name_key=key
+        )
+        root = repository._build_directory_structure()
+
+        # Legacy plaintext file at root passes through unchanged.
+        assert {f.name for f in root.files} == {"legacy"}
+        # Encrypted directory name is decrypted in the model.
+        assert len(root.children) == 1
+        filme = root.children[0]
+        assert filme.name == "Filme"
+        # Encrypted file name inside it is decrypted too.
+        assert {f.name for f in filme.files} == {"movie.mp4"}
+
+    @patch("tgfs.core.repository.impl.metadata.github_repo.Github")
     def test_build_directory_structure_with_gitkeep_ignored(
         self, mock_github_class, mock_github_config
     ):
@@ -443,6 +491,48 @@ class TestGithubDirectory:
         assert child_dir.name == "child"
         assert child_dir.parent == parent_dir
         assert child_dir in parent_dir.children
+
+    def test_create_dir_encrypts_path_when_keyed(self, mock_ghc):
+        """With a name key, the on-repo directory segment is encrypted."""
+        from tgfs.crypto.path_names import (
+            decrypt_path_name,
+            derive_path_name_key,
+            is_encrypted_path_name,
+        )
+
+        key = derive_path_name_key(b"\x42" * 32)
+        mock_ghc.name_key = key
+        mock_ghc.repo.create_file.return_value = Mock()
+
+        parent_dir = GithubDirectory(mock_ghc, "root", None)
+        parent_dir.create_dir("Filme")
+
+        path = mock_ghc.repo.create_file.call_args.kwargs["path"]
+        assert path.endswith("/.gitkeep")
+        segment = path[: -len("/.gitkeep")]
+        assert is_encrypted_path_name(segment)
+        assert decrypt_path_name(key, segment) == "Filme"
+
+    def test_create_file_ref_encrypts_name_when_keyed(self, mock_ghc):
+        """With a name key, the on-repo file segment is <enc(name)>.<id>."""
+        from tgfs.crypto.path_names import (
+            decrypt_path_name,
+            derive_path_name_key,
+            is_encrypted_path_name,
+        )
+
+        key = derive_path_name_key(b"\x42" * 32)
+        mock_ghc.name_key = key
+        mock_ghc.repo.create_file.return_value = Mock()
+
+        directory = GithubDirectory(mock_ghc, "root", None, stored_encrypted=True)
+        directory.create_file_ref("movie.mp4", 39)
+
+        path = mock_ghc.repo.create_file.call_args.kwargs["path"]
+        enc_name, message_id = path.rsplit(".", 1)
+        assert message_id == "39"
+        assert is_encrypted_path_name(enc_name)
+        assert decrypt_path_name(key, enc_name) == "movie.mp4"
 
     def test_create_dir_with_github_ops_failure(self, mock_ghc):
         """Test creating directory with GitHub operation failure"""

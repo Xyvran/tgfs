@@ -8,6 +8,11 @@ from github.ContentFile import ContentFile
 from tgfs.config import GithubRepoConfig
 from tgfs.core.model import TGFSDirectory, TGFSMetadata
 from tgfs.core.repository.interface import IMetaDataRepository
+from tgfs.crypto.path_names import (
+    PathNameEncryptionError,
+    decrypt_path_name,
+    is_encrypted_path_name,
+)
 
 from .gh_directory import GithubConfig, GithubDirectory
 
@@ -15,7 +20,9 @@ logger = logging.getLogger(__name__)
 
 
 class GithubRepoMetadataRepository(IMetaDataRepository):
-    def __init__(self, config: GithubRepoConfig):
+    def __init__(
+        self, config: GithubRepoConfig, name_key: Optional[bytes] = None
+    ):
         super().__init__()
 
         gh = Github(config.access_token)
@@ -25,6 +32,7 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
             repo_name=config.repo,
             repo=gh.get_repo(config.repo),
             commit=config.commit,
+            name_key=name_key,
         )
 
     async def push(self) -> None:
@@ -67,11 +75,34 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
             logger.debug(f"Could not read repo timestamps for root: {ex}")
 
     def _create_child_dir(
-        self, name: str, parent_dir: GithubDirectory
+        self,
+        name: str,
+        parent_dir: GithubDirectory,
+        stored_encrypted: bool = False,
     ) -> GithubDirectory:
-        child_dir = GithubDirectory(self._ghc, name, parent_dir)
+        child_dir = GithubDirectory(
+            self._ghc, name, parent_dir, stored_encrypted=stored_encrypted
+        )
         parent_dir.children.append(child_dir)
         return child_dir
+
+    def _decode_name(self, raw: str) -> tuple[str, bool]:
+        """Map an on-repo path segment to its (plaintext, was_encrypted) form.
+
+        Legacy plaintext segments pass through unchanged; encrypted ones are
+        decrypted with the configured key. This is what lets encrypted and
+        plaintext entries coexist in the same repo during/after migration.
+        """
+        if not is_encrypted_path_name(raw):
+            return raw, False
+        key = self._ghc.name_key
+        if key is None:
+            return raw, True  # cannot decrypt without the key
+        try:
+            return decrypt_path_name(key, raw), True
+        except PathNameEncryptionError as ex:
+            logger.warning(f"Failed to decrypt path name {raw!r}: {ex}")
+            return raw, True
 
     def _latest_commit_date(self, path: str) -> Optional[datetime.datetime]:
         """Date of the most recent commit touching ``path`` (newest first).
@@ -118,7 +149,13 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
 
         for content in contents:
             if content.type == "dir":
-                child_dir = self._create_child_dir(content.name, parent_dir)
+                # content.name is the on-repo (possibly encrypted) segment;
+                # decrypt it for the in-memory model but keep using
+                # content.path (the storage path) for the git-history lookup.
+                dir_name, was_encrypted = self._decode_name(content.name)
+                child_dir = self._create_child_dir(
+                    dir_name, parent_dir, stored_encrypted=was_encrypted
+                )
                 self._restore_dir_timestamps(child_dir, content.path)
                 try:
                     child_contents = self._ghc.repo.get_contents(
@@ -133,7 +170,8 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
                 try:
                     if content.name == ".gitkeep":
                         continue
-                    file_name, message_id = content.name.rsplit(".", 1)
+                    stored_name, message_id = content.name.rsplit(".", 1)
+                    file_name, _ = self._decode_name(stored_name)
                     TGFSDirectory.create_file_ref(
                         parent_dir, file_name, int(message_id)
                     )
