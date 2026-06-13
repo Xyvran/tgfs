@@ -38,6 +38,7 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
         root = GithubDirectory(
             self._ghc, name="root", parent=None, children=[], files=[]
         )
+        self._restore_root_timestamps(root)
 
         try:
             contents = self._ghc.repo.get_contents("", ref=self._ghc.commit)
@@ -46,6 +47,24 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
             logger.error(ex)
 
         return root
+
+    def _restore_root_timestamps(self, root: GithubDirectory) -> None:
+        """Give the root its real dates from the repo's own metadata.
+
+        The root has no ``.gitkeep`` to date it from, so fall back to the
+        backing repository's creation and last-push timestamps instead of
+        the ``now()`` dataclass default. Best-effort: any failure leaves the
+        default rather than breaking the load.
+        """
+        try:
+            created = self._ghc.repo.created_at
+            modified = self._ghc.repo.pushed_at or self._ghc.repo.updated_at
+            if isinstance(created, datetime.datetime):
+                root.created_at = created
+            if isinstance(modified, datetime.datetime):
+                root.modified_at = modified
+        except Exception as ex:
+            logger.debug(f"Could not read repo timestamps for root: {ex}")
 
     def _create_child_dir(
         self, name: str, parent_dir: GithubDirectory
