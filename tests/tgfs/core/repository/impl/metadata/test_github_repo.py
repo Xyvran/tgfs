@@ -114,6 +114,28 @@ class TestGithubRepoMetadataRepository:
         assert result.dir.parent is None
 
     @patch("tgfs.core.repository.impl.metadata.github_repo.Github")
+    def test_build_directory_structure_restores_root_timestamps(
+        self, mock_github_class, mock_github_config
+    ):
+        """Root directory dates come from the backing repo's own metadata."""
+        mock_github_instance = Mock(spec=Github)
+        mock_repo = Mock(spec=Repository)
+        mock_github_instance.get_repo.return_value = mock_repo
+        mock_github_class.return_value = mock_github_instance
+
+        created = datetime.datetime(2025, 1, 2, 9, 0, tzinfo=datetime.timezone.utc)
+        pushed = datetime.datetime(2026, 6, 1, 18, 0, tzinfo=datetime.timezone.utc)
+        mock_repo.created_at = created
+        mock_repo.pushed_at = pushed
+        mock_repo.get_contents.return_value = []
+
+        repository = GithubRepoMetadataRepository(mock_github_config)
+        root_dir = repository._build_directory_structure()
+
+        assert root_dir.created_at == created
+        assert root_dir.modified_at == pushed
+
+    @patch("tgfs.core.repository.impl.metadata.github_repo.Github")
     def test_build_directory_structure_with_files_and_dirs(
         self, mock_github_class, mock_github_config
     ):
