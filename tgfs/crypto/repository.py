@@ -36,6 +36,7 @@ from tgfs.crypto.cipher import (
 )
 from tgfs.crypto.header import HEADER_SIZE, MAGIC, FileHeader, InvalidHeaderError
 from tgfs.crypto.kdf import derive_file_key
+from tgfs.crypto.names import derive_name_key, encrypt_name
 from tgfs.crypto.stream import EncryptingFileMessage
 from tgfs.reqres import FileContent, SentFileMessage, UploadableFileMessage
 
@@ -97,10 +98,17 @@ class EncryptingFileContentRepository(IFileContentRepository):
         master_key: bytes,
         *,
         chunk_size: int,
+        encrypt_names: bool = False,
     ) -> None:
         self._inner = inner
         self._master_key = master_key
         self._chunk_size = chunk_size
+        self._encrypt_names = encrypt_names
+        # Derive once at construction; ``derive_name_key`` runs HKDF on the
+        # master key so doing it per upload would be wasteful.
+        self._name_key: Optional[bytes] = (
+            derive_name_key(master_key) if encrypt_names else None
+        )
         self._cache = _HeaderCache()
 
     # -- save --------------------------------------------------------------
@@ -108,6 +116,10 @@ class EncryptingFileContentRepository(IFileContentRepository):
     async def save(
         self, file_msg: UploadableFileMessage
     ) -> List[SentFileMessage]:
+        if self._name_key is not None and file_msg.name:
+            # Obfuscate the Telegram-visible document name BEFORE wrapping,
+            # so the part-numbering loop downstream sees the encrypted form.
+            file_msg.name = encrypt_name(self._name_key, file_msg.name)
         # Build a fresh header (with a random salt) and derive the per-file
         # key. The header itself is written inline at the start of the
         # ciphertext stream.
@@ -131,6 +143,8 @@ class EncryptingFileContentRepository(IFileContentRepository):
         # except when the caller is the metadata layer talking to itself --
         # but the file content repository is only invoked for file content,
         # so encrypting unconditionally is correct here.
+        if self._name_key is not None and name:
+            name = encrypt_name(self._name_key, name)
         header = FileHeader.new(chunk_size=self._chunk_size)
         file_key = derive_file_key(self._master_key, header.file_salt)
         cipher = ChunkedAESGCM(

@@ -61,6 +61,7 @@ class Client:
                 fc_repo,
                 master_key=master.key,
                 chunk_size=encryption_cfg.chunk_size,
+                encrypt_names=encryption_cfg.encrypt_names,
             )
 
         fd_repo = TGMsgFDRepository(message_api)

@@ -50,9 +50,19 @@ tgfs:
   #
   # ``chunk_size`` defaults to 65536 (64 KiB). Larger -> less overhead, worse
   # random-access granularity; smaller -> more per-chunk auth-tag cost.
+  #
+  # ``encrypt_names`` (default ``false``) additionally replaces every
+  # Telegram-visible document name -- including the pinned metadata blob --
+  # with an AES-GCM ciphertext token, so a passive observer of the channel
+  # cannot read file or directory names from document metadata. The
+  # plaintext names continue to live inside the (also encrypted)
+  # metadata.json, so WebDAV and the manager UI are unaffected.
+  # Note: only new uploads are affected; previously uploaded files keep
+  # their original Telegram document name.
   # ---------------------------------------------------------------------------
   encryption:
     enabled: false
+    encrypt_names: false
     # passphrase: "change-me-or-use-a-file"
     passphrase_env: TGFS_MASTER_PASSPHRASE
     # passphrase_file: secrets/master.passphrase
