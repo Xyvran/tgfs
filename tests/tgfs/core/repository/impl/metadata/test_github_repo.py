@@ -651,37 +651,58 @@ class TestGithubDirectory:
         assert file_ref not in directory.files
 
     def test_delete_directory(self, mock_ghc):
-        """Test deleting directory"""
-        mock_content1 = Mock()
-        mock_content1.path = "testdir/file1.txt"
-        mock_content1.sha = "sha1"
+        """Deleting a directory rewrites the tree without its whole subtree."""
 
-        mock_content2 = Mock()
-        mock_content2.path = "testdir/file2.txt"
-        mock_content2.sha = "sha2"
+        def blob(path):
+            e = Mock()
+            e.path, e.type, e.sha, e.mode = path, "blob", path + "-sha", "100644"
+            return e
 
-        mock_ghc.repo.get_contents.return_value = [mock_content1, mock_content2]
-        mock_ghc.repo.delete_file.return_value = Mock()
+        subtree = Mock()
+        subtree.path, subtree.type = "testdir/sub", "tree"
+
+        entries = [
+            blob("testdir/.gitkeep"),
+            blob("testdir/sub/.gitkeep"),  # nested -> must also be removed
+            subtree,  # a tree entry -> ignored
+            blob("other/.gitkeep"),  # unrelated -> must be kept
+        ]
+
+        ref = Mock()
+        ref.object.sha = "commitsha"
+        base_commit = Mock()
+        base_commit.tree.sha = "basetreesha"
+        tree = Mock()
+        tree.tree = entries
+        new_commit = Mock()
+        new_commit.sha = "newcommitsha"
+
+        mock_ghc.repo.get_git_ref.return_value = ref
+        mock_ghc.repo.get_git_commit.return_value = base_commit
+        mock_ghc.repo.get_git_tree.return_value = tree
+        mock_ghc.repo.create_git_tree.return_value = Mock()
+        mock_ghc.repo.create_git_commit.return_value = new_commit
 
         parent = Mock()
         parent.children = []
-
         directory = GithubDirectory(mock_ghc, "testdir", parent)
         parent.children.append(directory)
 
         directory.delete()
 
-        # Verify GitHub API calls
-        mock_ghc.repo.get_contents.assert_called_once_with("testdir", ref="main")
-        assert mock_ghc.repo.delete_file.call_count == 2
-
-        # Verify directory was removed from parent
+        # New tree keeps only the unrelated blob (both testdir blobs dropped).
+        kept = mock_ghc.repo.create_git_tree.call_args[0][0]
+        assert len(kept) == 1
+        mock_ghc.repo.get_git_tree.assert_called_once_with(
+            "basetreesha", recursive=True
+        )
+        ref.edit.assert_called_once_with("newcommitsha")
         assert directory not in parent.children
 
     @patch("tgfs.core.repository.impl.metadata.github_repo.gh_directory.logger")
     def test_delete_directory_handles_errors(self, mock_logger, mock_ghc):
         """Test deleting directory with error handling"""
-        mock_ghc.repo.get_contents.side_effect = Exception("Access denied")
+        mock_ghc.repo.get_git_ref.side_effect = Exception("Access denied")
 
         parent = Mock()
         parent.children = []
