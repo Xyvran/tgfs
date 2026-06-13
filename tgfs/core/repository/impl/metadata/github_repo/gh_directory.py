@@ -2,7 +2,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from github import Github
+from github import Github, InputGitTreeElement
 from github.Repository import Repository
 
 from tgfs.core.model import TGFSDirectory, TGFSFileRef
@@ -192,31 +192,54 @@ class GithubDirectory(TGFSDirectory):
         super().delete_file_ref(fr)
 
     def _delete_github_directory(self) -> None:
-        """Delete all contents of this directory from GitHub"""
+        """Remove this directory and everything beneath it in one commit.
+
+        ``delete_file`` can only remove a single file — it returns HTTP 422
+        on a subtree — so a per-entry delete cannot recurse into
+        subdirectories (their nested ``.gitkeep`` and files would survive).
+        Instead we rewrite the git tree without any blob under this
+        directory's path, dropping arbitrarily-nested content atomically in
+        a single commit via the Git Data API.
+        """
+        prefix = self._github_path
+        if not prefix:
+            return  # guard: never wipe the whole repo via the root
         try:
-            # Get all contents in this directory
-            contents = self._ghc.repo.get_contents(
-                self._github_path, ref=self._ghc.commit
+            ref = self._ghc.repo.get_git_ref(f"heads/{self._ghc.commit}")
+            base_commit = self._ghc.repo.get_git_commit(ref.object.sha)
+            tree = self._ghc.repo.get_git_tree(base_commit.tree.sha, recursive=True)
+
+            kept: list[InputGitTreeElement] = []
+            removed = 0
+            for entry in tree.tree:
+                if entry.type != "blob":
+                    continue
+                if entry.path == prefix or entry.path.startswith(prefix + "/"):
+                    removed += 1
+                    continue
+                kept.append(
+                    InputGitTreeElement(
+                        path=entry.path,
+                        mode=entry.mode,
+                        type="blob",
+                        sha=entry.sha,
+                    )
+                )
+
+            if removed == 0:
+                return
+
+            new_tree = self._ghc.repo.create_git_tree(kept)
+            new_commit = self._ghc.repo.create_git_commit(
+                f"Delete directory {prefix}", new_tree, [base_commit]
             )
-            if not isinstance(contents, list):
-                contents = [contents]
-
-            # Delete all files and subdirectories
-            for content in contents:
-                try:
-                    self._ghc.repo.delete_file(
-                        path=content.path,
-                        message=f"Delete {content.path}",
-                        sha=content.sha,
-                        branch=self._ghc.commit,
-                    )
-                    logger.info(f"Deleted {content.path} from {self._ghc.repo_name}")
-                except Exception as ex:
-                    logger.error(
-                        f"Failed to delete {content.path} from {self._ghc.repo_name}: {ex}"
-                    )
-
+            ref.edit(new_commit.sha)
+            logger.info(
+                f"Deleted {removed} object(s) under {prefix} "
+                f"from {self._ghc.repo_name}"
+            )
         except Exception as ex:
             logger.error(
-                f"Failed to delete directory {self._github_path} from {self._ghc.repo_name}: {ex}"
+                f"Failed to delete directory {prefix} "
+                f"from {self._ghc.repo_name}: {ex}"
             )
