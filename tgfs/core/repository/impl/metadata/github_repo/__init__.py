@@ -1,7 +1,10 @@
+import datetime
 import logging
+from typing import Optional
 
 from github import Github
 from github.ContentFile import ContentFile
+from github.GithubException import GithubException
 
 from tgfs.config import GithubRepoConfig
 from tgfs.core.model import TGFSDirectory, TGFSMetadata
@@ -52,6 +55,41 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
         parent_dir.children.append(child_dir)
         return child_dir
 
+    def _latest_commit_date(self, path: str) -> Optional[datetime.datetime]:
+        """Date of the most recent commit touching ``path`` (newest first).
+
+        Returns ``None`` when the path has no history, so callers can fall
+        back gracefully instead of crashing the whole metadata load.
+        """
+        try:
+            commits = self._ghc.repo.get_commits(sha=self._ghc.commit, path=path)
+            return commits[0].commit.committer.date
+        except (IndexError, GithubException) as ex:
+            logger.debug(f"No commit history for {path}: {ex}")
+            return None
+
+    def _restore_dir_timestamps(
+        self, directory: GithubDirectory, dir_path: str
+    ) -> None:
+        """Recover a directory's real created/modified dates from git history.
+
+        Without this the tree is rebuilt from the repo structure on every
+        load and ``created_at``/``modified_at`` fall back to ``now()`` (the
+        dataclass default), so WebDAV reports the server-start time for every
+        folder. The ``.gitkeep`` placeholder is written exactly once when the
+        directory is created and never touched again, so the commit that
+        introduced it is the true creation date; ``modified_at`` is the newest
+        commit anywhere under the directory path.
+        """
+        modified = self._latest_commit_date(dir_path)
+        created = self._latest_commit_date(f"{dir_path}/.gitkeep")
+        if created is None:
+            created = modified
+        if created is not None:
+            directory.created_at = created
+        if modified is not None:
+            directory.modified_at = modified
+
     def _process_contents(
         self, contents: list[ContentFile] | ContentFile, parent_dir: GithubDirectory
     ) -> None:
@@ -61,6 +99,7 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
         for content in contents:
             if content.type == "dir":
                 child_dir = self._create_child_dir(content.name, parent_dir)
+                self._restore_dir_timestamps(child_dir, content.path)
                 try:
                     child_contents = self._ghc.repo.get_contents(
                         content.path, ref=self._ghc.commit
