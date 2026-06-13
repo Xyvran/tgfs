@@ -52,6 +52,12 @@ class Client:
         # encryption is enabled in the config. Everything downstream
         # (FileApi, WebDAV, etc.) is unchanged: the wrapper preserves the
         # IFileContentRepository contract.
+        #
+        # When ``encrypt_names`` is also set we derive a separate,
+        # deterministic key for the metadata path names (directory and
+        # file-reference names stored in the GitHub repo) and hand it to the
+        # metadata backend below.
+        path_name_key: Optional[bytes] = None
         if encryption_cfg is not None and encryption_cfg.enabled:
             from tgfs.crypto.bootstrap import load_master_key
             from tgfs.crypto.repository import EncryptingFileContentRepository
@@ -63,6 +69,10 @@ class Client:
                 chunk_size=encryption_cfg.chunk_size,
                 encrypt_names=encryption_cfg.encrypt_names,
             )
+            if encryption_cfg.encrypt_names:
+                from tgfs.crypto.path_names import derive_path_name_key
+
+                path_name_key = derive_path_name_key(master.key)
 
         fd_repo = TGMsgFDRepository(message_api)
 
@@ -79,7 +89,9 @@ class Client:
                 GithubRepoMetadataRepository,
             )
 
-            metadata_repo = GithubRepoMetadataRepository(github_repo_config)
+            metadata_repo = GithubRepoMetadataRepository(
+                github_repo_config, name_key=path_name_key
+            )
 
         fd_api = FileDescApi(fd_repo, fc_repo)
 
