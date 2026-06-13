@@ -15,6 +15,8 @@ Usage (inside the tgfs container or any env with the config + deps):
     python -m scripts.encrypt_metadata_names            # dry run (default)
     python -m scripts.encrypt_metadata_names --apply    # perform the rename
 """
+# This is an operator CLI tool; user-facing output is intentionally via print.
+# ruff: noqa: T201
 from __future__ import annotations
 
 import argparse
