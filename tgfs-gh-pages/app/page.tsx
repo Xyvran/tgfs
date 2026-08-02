@@ -99,18 +99,6 @@ export default function Home() {
           </Link>
         </div>
 
-        <footer className="mt-16 pt-8 border-t border-slate-700 text-center">
-          <p className="text-slate-400">
-            Proudly Vibed by{" "}
-            <a
-              href="https://www.anthropic.com/claude-code"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Claude Code
-            </a>
-          </p>
-        </footer>
       </div>
     </div>
   );
