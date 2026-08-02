@@ -7,20 +7,21 @@ on:
       - completed
     branches:
       - master
+  workflow_dispatch:
 
 jobs:
   docker:
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     strategy:
       matrix:
         include:
           - name: tgfs
             dockerfile: Dockerfile
-            repository: wheatcarrier/tgfs
+            repository: xyvran/tgfs
           - name: tgfs-fe
             dockerfile: Dockerfile.frontend
-            repository: wheatcarrier/tgfs-fe
+            repository: xyvran/tgfs-fe
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
