@@ -187,16 +187,92 @@ Honors the existing `delete_messages_on_remove` flag.
 
 A background task, also exposed in the manager UI:
 
-- **Backfill**: walk the metadata tree, find versions with missing
-  mirror entries (covers all *pre-existing* files when redundancy is
-  first enabled), forward them, update FDs/metadata. Rate-limited,
-  resumable.
+- **Backfill**: mirror all pre-existing data — detailed below.
 - **Repair**: drain the queue of failed mirror writes; verify with
   `get_messages` that mirror copies still exist (they can be deleted
   manually too).
 - **Promote** (manual/CLI): given "primary X is banned", rewrite config
   guidance — data-side nothing to do, since mirrors are already
   first-class in the metadata.
+
+## Backfill: mirroring pre-existing data
+
+When redundancy is enabled on an existing installation, nothing that is
+already in the channel has a mirror. The backfill job closes that gap.
+It reuses the exact same primitives as the live write path, so there is
+no second implementation to maintain.
+
+### Enumeration: the metadata tree is the work list
+
+There is no need to scan the channel history. Everything TGFS serves is
+reachable from the directory metadata:
+
+```
+TGFSDirectory (root)
+  └─ TGFSFileRef.message_id      → FD text message in primary channel
+       └─ TGFSFileDesc.versions   → TGFSFileVersion.message_ids (content parts)
+```
+
+A depth-first walk over `TGFSDirectory` yields every file ref; loading
+each FD (`TGMsgFDRepository.get`) yields every version and its part
+message ids. Messages *not* referenced by metadata are invisible to
+TGFS anyway and are deliberately out of scope (an optional "orphan
+sweep" over channel history could be a later addition).
+
+### Unit of work: one file version, idempotent
+
+For each version of each file:
+
+1. **Skip check** — if `version.mirrors[mirror_channel]` exists and has
+   the right number of ids, the version is done. This makes the whole
+   job resumable for free: the FD itself is the checkpoint, no separate
+   state file needed (and the in-memory `TaskStore` never has to
+   survive a restart).
+2. **Validate** — drop invalid versions (`_validate_fv` already marks
+   versions whose primary messages were manually deleted; nothing to
+   mirror there).
+3. **Forward** — one `forward_messages(primary → mirror, part_ids)`
+   call. Telegram accepts up to 100 ids per call and returns the new
+   ids in order, so even a 100-part (≈200 GB) file is a single RPC.
+4. **Commit** — write the `mirrors` map into the FD JSON via the
+   existing `edit_message_text` on the FD message. This edit is the
+   commit point of the unit of work.
+5. **Mirror the FD itself** — `send_text` the updated FD JSON to the
+   mirror channel, record its id in `fr.mirrors`, push metadata
+   (batched: one metadata push per N files, not per file).
+
+Crash-safety: a crash between step 3 and 4 leaves already-forwarded
+copies in the mirror that the re-run does not know about. The re-run
+simply forwards again — the stale copies are harmless orphans (bytes
+are free) and can be swept by the repair job later. No step can lose
+data; the commit point makes duplicates the *worst* outcome.
+
+### Throughput and rate limits
+
+- `forward_messages` is server-side: **zero download/upload bandwidth**,
+  cost is one RPC per version (plus one FD edit + one FD send). A
+  library of 10 000 files ≈ 30 000 RPCs ≈ under an hour at the existing
+  20 req/s limiter, independent of data volume.
+- Telegram may still answer `FLOOD_WAIT_X` on sustained forwarding —
+  the job must honor it (sleep X, resume), which the idempotent design
+  makes trivial.
+- `mode: reupload` fallback (for `noforwards` channels): the job streams
+  each part down and up again — bandwidth-bound, so it should run with
+  low concurrency and clearly report ETA in the manager UI.
+
+### Ordering and operation
+
+- Process **newest files first** (sort by `updated_at`) — recent data is
+  usually the most valuable, and the job may run for a while.
+- Expose as a manager-UI task (progress = versions done / total, reusing
+  `TaskStore`) and optionally auto-start on boot when redundancy is
+  enabled and unmirrored versions exist ("eventual redundancy").
+- Live uploads during backfill are unaffected: they mirror themselves
+  synchronously via the write path, and the skip check keeps the two
+  from colliding.
+- A final **verification pass** (`get_messages` on all recorded mirror
+  ids, batched 100 per call) confirms the mirror is actually complete —
+  this is the same code the repair job runs periodically.
 
 ## Interaction with existing features
 
