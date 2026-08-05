@@ -287,6 +287,63 @@ data; the commit point makes duplicates the *worst* outcome.
 - **Import via Mini App**: imported messages live in the primary; the
   backfill job mirrors them like any other file.
 
+## Config generator (tgfs-gh-pages)
+
+The interactive config generator
+(`tgfs-gh-pages/app/config-generator/`) builds the YAML clientside and
+must learn the new `redundancy` block:
+
+- **Data model** (`page.tsx`): extend `ChannelConfig` with
+  `mirrors: string[]`, and add a top-level
+  `redundancy: { mode: "forward" | "reupload"; strict: boolean }` to
+  `ConfigData` (+ the matching `ConfigUpdatePaths` entries).
+- **UI**: per-channel mirror inputs belong inside `ChannelField.tsx` —
+  a "Mirror Channel IDs" list under each channel (add/remove rows, same
+  pattern as bot tokens), so it is visually obvious *which* primary a
+  mirror protects. Global `mode`/`strict` go into a new optional
+  "Redundancy" `FormSection` next to "Encryption (Optional)", hidden
+  behind an enable checkbox like encryption is.
+- **YAML generation** (`generateYaml`): emit
+  `telegram.redundancy.mirrors` as a map keyed by primary channel id,
+  only for channels that have non-empty mirror entries; omit the block
+  entirely when no mirrors are configured (keeps generated configs for
+  non-users unchanged).
+- **Validation** (same style as `getChannelNameErrors`):
+  - mirror id must be non-empty and numeric-ish like channel ids;
+  - a mirror must not equal its own primary;
+  - no duplicate mirrors within one channel;
+  - warn if a mirror id is also used as a primary channel (two
+    filesystems writing into one channel invites id confusion).
+- **Inline help text** (the generator is the de-facto documentation):
+  - bots must be admin in every mirror channel;
+  - the primary channel must not have "Restrict saving content"
+    enabled, otherwise only `mode: reupload` works;
+  - recommend `github_repo` metadata when redundancy is enabled — the
+    directory tree then survives even a total channel loss;
+  - note that enabling redundancy later is fine: the backfill task
+    mirrors existing files.
+
+## Documentation updates
+
+- **README.md**: new feature bullet ("Optional channel redundancy —
+  files are mirrored to additional channels via server-side
+  forwarding") and a "Channel redundancy" section mirroring the
+  encryption section's structure: motivation (channel ban), config
+  example, requirements (bot admin rights, `noforwards` off), and the
+  promotion runbook (what to change in the config when the primary is
+  banned).
+- **Getting-started page** (`tgfs-gh-pages/app/getting-started/`):
+  short subsection pointing at the config generator's redundancy
+  section.
+- **Wiki (technical detail)**: document the `mirrors` field in the FD
+  serialization (`TGFSFileVersion` / `TGFSFileRef`) so third-party
+  tooling that parses FD JSON knows the format is
+  backward-compatible.
+- **Example configs**: `demo-config.yaml` and `config-test.yaml` gain a
+  commented-out `redundancy` block showing the shape.
+- **Manager UI**: the backfill task's surface (start button, progress,
+  verification result) documented alongside the existing task UI docs.
+
 ## Failure modes considered
 
 - Mirror channel down during upload → logged + repair queue (non-strict)
@@ -312,7 +369,10 @@ data; the commit point makes duplicates the *worst* outcome.
 5. Read path failover + circuit breaker.
 6. Delete fan-out.
 7. Backfill/repair task + manager UI hook.
-8. Docs: admin guide (bot rights, `noforwards`, promotion runbook).
+8. Config generator: `redundancy` block, per-channel mirror fields,
+   validation, inline help (tgfs-gh-pages).
+9. Docs: README section, getting-started, wiki (FD `mirrors` format),
+   example configs, promotion runbook.
 
 Steps 1–4 already deliver the core value (every new upload is mirrored);
-5–7 make it operationally complete.
+5–7 make it operationally complete; 8–9 ship it to users.
