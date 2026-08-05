@@ -348,7 +348,7 @@ export default function GettingStarted() {
                   <code className="text-sm text-slate-300 block break-all">
                     docker run -it -v {dockerConfig.mountedVolume}
                     :/home/tgfs/.tgfs -p {dockerConfig.tgfsPort}:
-                    {dockerConfig.tgfsPort} wheatcarrier/tgfs
+                    {dockerConfig.tgfsPort} xyvran/tgfs
                   </code>
                 </div>
 

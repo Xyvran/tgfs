@@ -851,7 +851,7 @@ export default function ConfigGenerator() {
                   http://{config.tgfs.server.host}:{config.tgfs.server.port}
                 </code>{" "}
                 {"("}Used in the{" "}
-                <a href="https://theodorekrypton.github.io/tgfs/telegram-mini-app/">
+                <a href="https://xyvran.github.io/tgfs/telegram-mini-app/">
                   <u>Telegram Mini App</u>
                 </a>
                 {")"}.

@@ -1,19 +1,21 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/TheodoreKrypton/tgfs/master/tgfs.png" alt="logo" width="100"/>
+  <img src="https://raw.githubusercontent.com/Xyvran/tgfs/master/tgfs.png" alt="logo" width="100"/>
 </p>
 
-[![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=for-the-badge&logo=docker&logoColor=white)](https://hub.docker.com/r/wheatcarrier/tgfs)
-[![Telegram Group](https://img.shields.io/badge/telegram-group-blue?style=for-the-badge&logo=telegram)](https://theodorekrypton.github.io/tgfs/join-group)
-[![Telegram Mini App](https://img.shields.io/badge/telegram-miniapp-blue?style=for-the-badge&logo=telegram)](https://theodorekrypton.github.io/tgfs/telegram-mini-app)
-[![Codecov](https://img.shields.io/codecov/c/github/TheodoreKrypton/tgfs?style=for-the-badge)](https://codecov.io/gh/TheodoreKrypton/tgfs)
+[![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=for-the-badge&logo=docker&logoColor=white)](https://hub.docker.com/r/xyvran/tgfs)
+[![Telegram Group](https://img.shields.io/badge/telegram-group-blue?style=for-the-badge&logo=telegram)](https://xyvran.github.io/tgfs/join-group)
+[![Telegram Mini App](https://img.shields.io/badge/telegram-miniapp-blue?style=for-the-badge&logo=telegram)](https://xyvran.github.io/tgfs/telegram-mini-app)
+[![Codecov](https://img.shields.io/codecov/c/github/Xyvran/tgfs?style=for-the-badge)](https://codecov.io/gh/Xyvran/tgfs)
 
 # tgfs
 
 Telegram becomes a WebDAV server.
 
-Refer to [getting started](https://theodorekrypton.github.io/tgfs/) for installation and usage. (Docker or other container engine is required)
+Many thanks to [WheatCarrier](https://github.com/TheodoreKrypton/tgfs) for creating the original tgfs project this repository is built upon.
 
-Refer to the [wiki page](https://github.com/TheodoreKrypton/tgfs/wiki/TGFS-Wiki) for technical detail.
+Refer to [getting started](https://xyvran.github.io/tgfs/) for installation and usage. (Docker or other container engine is required)
+
+Refer to the [wiki page](https://github.com/Xyvran/tgfs/wiki/TGFS-Wiki) for technical detail.
 
 ## Tested Clients
 * [rclone](https://rclone.org/)
@@ -181,14 +183,14 @@ container -- never hard-code it into the image:
 ```bash
 docker run -e TGFS_MASTER_PASSPHRASE \
   -v ~/.tgfs:/root/.tgfs \
-  wheatcarrier/tgfs
+  xyvran/tgfs
 ```
 
 ```yaml
 # docker-compose.yml
 services:
   tgfs:
-    image: wheatcarrier/tgfs
+    image: xyvran/tgfs
     environment:
       TGFS_MASTER_PASSPHRASE: ${TGFS_MASTER_PASSPHRASE}
     volumes:
@@ -245,7 +247,7 @@ spec:
     spec:
       containers:
         - name: tgfs
-          image: wheatcarrier/tgfs
+          image: xyvran/tgfs
           env:
             - name: TGFS_MASTER_PASSPHRASE
               valueFrom:
@@ -267,13 +269,6 @@ spec:
   mechanism (that's the entire point of the design). Keep a copy in
   your password manager.
 
-
-## Demo Server
-* WebDAV URL: `https://tgfs-demo.wheatcarrier.site/webdav`
-* `username` and `password` can be any
-* File channel on Telegram: [@tgfsdemo](https://t.me/tgfsdemo)
-* Github repository for metadata: [https://github.com/tgfs-demo/tgfs-demo](https://github.com/tgfs-demo/tgfs-demo)
-* Config file: [config.yaml](https://github.com/TheodoreKrypton/tgfs/blob/master/demo-config.yaml)
 
 ## Development
 
