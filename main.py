@@ -55,6 +55,7 @@ async def create_clients(config: Config) -> Clients:
                 else False
             ),
             encryption_cfg=config.tgfs.encryption,
+            redundancy_cfg=config.telegram.redundancy,
         )
     return clients
 

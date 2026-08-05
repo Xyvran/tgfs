@@ -18,6 +18,7 @@ from tgfs.reqres import (
     DownloadFileResp,
     EditMessageMediaReq,
     EditMessageTextReq,
+    ForwardMessagesReq,
     GetMeResp,
     GetMessagesReq,
     GetMessagesResp,
@@ -240,6 +241,24 @@ class PyrogramAPI(ITDLibClient):
         )
         update = assert_update(updates, rt.UpdateMessageID)
         return SendMessageResp(message_id=update.id)
+
+    async def forward_messages(
+        self, req: ForwardMessagesReq
+    ) -> list[SendMessageResp]:
+        forwarded = await self._client.forward_messages(
+            chat_id=req.to_chat,
+            from_chat_id=req.from_chat,
+            message_ids=list(req.message_ids),
+        )
+        if isinstance(forwarded, t.Message):
+            forwarded = [forwarded]
+        if not forwarded or len(forwarded) != len(req.message_ids):
+            raise TechnicalError(
+                f"Forwarding {len(req.message_ids)} messages from {req.from_chat} "
+                f"to {req.to_chat} returned "
+                f"{len(forwarded) if forwarded else 0} messages"
+            )
+        return [SendMessageResp(message_id=m.id) for m in forwarded]
 
     async def download_file(self, req: DownloadFileReq) -> DownloadFileResp:
         if not (

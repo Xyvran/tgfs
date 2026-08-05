@@ -37,11 +37,18 @@ interface ChannelConfig {
   id: string;
   name: string;
   type: "pinned_message" | "github_repo";
+  mirrors: string[];
   github_repo?: {
     repo: string;
     commit: string;
     access_token: string;
   };
+}
+
+interface RedundancyConfig {
+  enabled: boolean;
+  mode: "forward" | "reupload";
+  strict: boolean;
 }
 
 interface ConfigData {
@@ -109,6 +116,11 @@ const generateRandomSecret = (): string => {
 export default function ConfigGenerator() {
   const [withUserAccountUpload, setWithUserAccountUpload] = useState(false);
   const [withUserAccountDownload, setWithUserAccountDownload] = useState(false);
+  const [redundancy, setRedundancy] = useState<RedundancyConfig>({
+    enabled: false,
+    mode: "forward",
+    strict: false,
+  });
 
   const [config, setConfig] = useState<ConfigData>({
     telegram: {
@@ -127,6 +139,7 @@ export default function ConfigGenerator() {
           id: "",
           name: "default",
           type: "pinned_message",
+          mirrors: [],
           github_repo: {
             repo: "",
             commit: "master",
@@ -285,6 +298,28 @@ export default function ConfigGenerator() {
         private_file_channel: config.telegram.channels
           .filter((channel) => channel.id.trim() !== "")
           .map((channel) => channel.id),
+        ...(() => {
+          if (!redundancy.enabled) return {};
+          const mirrors: { [channelId: string]: string[] } = {};
+          config.telegram.channels
+            .filter((channel) => channel.id.trim() !== "")
+            .forEach((channel) => {
+              const mirrorIds = (channel.mirrors || [])
+                .map((m) => m.trim())
+                .filter((m) => m !== "" && m !== channel.id.trim());
+              if (mirrorIds.length > 0) {
+                mirrors[channel.id] = mirrorIds;
+              }
+            });
+          if (Object.keys(mirrors).length === 0) return {};
+          return {
+            redundancy: {
+              mirrors,
+              mode: redundancy.mode,
+              strict: redundancy.strict,
+            },
+          };
+        })(),
       },
       tgfs: {
         users: config.tgfs.users.reduce((acc, user) => {
@@ -379,6 +414,7 @@ export default function ConfigGenerator() {
         id: "",
         name: `channel-${config.telegram.channels.length + 1}`,
         type: "pinned_message" as const,
+        mirrors: [],
         github_repo: {
           repo: "",
           commit: "master",
@@ -387,6 +423,67 @@ export default function ConfigGenerator() {
       },
     ];
     updateConfig("telegram.channels", newChannels);
+  };
+
+  const addMirror = (channelIndex: number) => {
+    const newChannels = [...config.telegram.channels];
+    newChannels[channelIndex].mirrors = [
+      ...(newChannels[channelIndex].mirrors || []),
+      "",
+    ];
+    updateConfig("telegram.channels", newChannels);
+  };
+
+  const removeMirror = (channelIndex: number, mirrorIndex: number) => {
+    const newChannels = [...config.telegram.channels];
+    newChannels[channelIndex].mirrors = newChannels[
+      channelIndex
+    ].mirrors.filter((_, i) => i !== mirrorIndex);
+    updateConfig("telegram.channels", newChannels);
+  };
+
+  const updateMirror = (
+    channelIndex: number,
+    mirrorIndex: number,
+    value: string
+  ) => {
+    const newChannels = [...config.telegram.channels];
+    const mirrors = [...newChannels[channelIndex].mirrors];
+    mirrors[mirrorIndex] = value;
+    newChannels[channelIndex].mirrors = mirrors;
+    updateConfig("telegram.channels", newChannels);
+  };
+
+  const getMirrorErrors = (channelIndex: number): string[][] => {
+    const channel = config.telegram.channels[channelIndex];
+    const primaryIds = config.telegram.channels
+      .map((c) => c.id.trim())
+      .filter((id) => id !== "");
+    return (channel.mirrors || []).map((mirror, mirrorIndex) => {
+      const errors: string[] = [];
+      const value = mirror.trim();
+      if (!value) {
+        errors.push("Mirror channel ID is required (or remove this row)");
+        return errors;
+      }
+      if (value === channel.id.trim()) {
+        errors.push("A channel cannot mirror itself");
+      }
+      if (
+        (channel.mirrors || []).findIndex(
+          (m, i) => i !== mirrorIndex && m.trim() === value
+        ) !== -1
+      ) {
+        errors.push("Duplicate mirror channel");
+      }
+      if (primaryIds.includes(value)) {
+        errors.push(
+          "This ID is also used as a primary file channel — a mirror " +
+          "should be a dedicated channel"
+        );
+      }
+      return errors;
+    });
   };
 
   const removeChannel = (index: number) => {
@@ -576,6 +673,15 @@ export default function ConfigGenerator() {
                     }
                     canDelete={config.telegram.channels.length > 1}
                     nameErrors={getChannelNameErrors(index, channel.name)}
+                    redundancyEnabled={redundancy.enabled}
+                    mirrorErrors={getMirrorErrors(index)}
+                    onAddMirror={() => addMirror(index)}
+                    onRemoveMirror={(mirrorIndex) =>
+                      removeMirror(index, mirrorIndex)
+                    }
+                    onUpdateMirror={(mirrorIndex, value) =>
+                      updateMirror(index, mirrorIndex, value)
+                    }
                   />
                 ))}
                 <Button
@@ -750,6 +856,89 @@ export default function ConfigGenerator() {
                 </a>
                 {")"}.
               </Typography>
+            </FormSection>
+
+            <FormSection title="Redundancy (Optional)">
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                RAID-1-style mirroring: every file uploaded to a channel is
+                also copied to its mirror channel(s) via server-side message
+                forwarding, so your data survives a channel getting banned
+                or deleted. Configure the mirror channel IDs per channel
+                above once enabled. Enabling this later is fine — the
+                backfill task (Manager API:{" "}
+                <code>POST /redundancy/backfill/&lt;channel-name&gt;</code>)
+                mirrors all pre-existing files without re-uploading them.
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                Tip: with redundancy enabled, the GitHub Repository metadata
+                type is recommended — the directory structure then survives
+                even the loss of all channels.
+              </Typography>
+              <FormControlLabel
+                label="Enable channel redundancy"
+                control={
+                  <Checkbox
+                    checked={redundancy.enabled}
+                    onChange={(e) =>
+                      setRedundancy({
+                        ...redundancy,
+                        enabled: e.target.checked,
+                      })
+                    }
+                  />
+                }
+              />
+              {redundancy.enabled && (
+                <>
+                  <FieldRow>
+                    <FormControl size="small" sx={{ minWidth: 220 }}>
+                      <InputLabel>Mirroring Mode</InputLabel>
+                      <Select
+                        value={redundancy.mode}
+                        label="Mirroring Mode"
+                        onChange={(e) =>
+                          setRedundancy({
+                            ...redundancy,
+                            mode: e.target.value as "forward" | "reupload",
+                          })
+                        }
+                      >
+                        <MenuItem value="forward">
+                          Forward (server-side, recommended)
+                        </MenuItem>
+                        <MenuItem value="reupload">
+                          Re-upload (for restricted channels)
+                        </MenuItem>
+                      </Select>
+                    </FormControl>
+                  </FieldRow>
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                    sx={{ mb: 1 }}
+                  >
+                    &quot;Forward&quot; copies files on Telegram&apos;s
+                    servers without using your bandwidth, but requires the
+                    primary channel to allow forwarding (&quot;Restrict
+                    saving content&quot; must be off). &quot;Re-upload&quot;
+                    always works but downloads and uploads every byte again.
+                  </Typography>
+                  <FormControlLabel
+                    label="Strict mode (fail uploads when mirroring fails; default is log-and-continue)"
+                    control={
+                      <Checkbox
+                        checked={redundancy.strict}
+                        onChange={(e) =>
+                          setRedundancy({
+                            ...redundancy,
+                            strict: e.target.checked,
+                          })
+                        }
+                      />
+                    }
+                  />
+                </>
+              )}
             </FormSection>
 
             <FormSection title="Encryption (Optional)">

@@ -1,6 +1,6 @@
 from abc import ABCMeta, abstractmethod
-from dataclasses import dataclass
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
 from tgfs.core.model import (
     TGFSDirectory,
@@ -17,6 +17,9 @@ from tgfs.reqres import FileContent, SentFileMessage, UploadableFileMessage
 class FDRepositoryResp:
     message_id: int
     fd: TGFSFileDesc
+    # Mirror channel id -> message id of the FD copy in that channel.
+    # Empty when redundancy is off.
+    mirrors: Dict[str, int] = field(default_factory=dict)
 
 
 class IFileContentRepository(metaclass=ABCMeta):

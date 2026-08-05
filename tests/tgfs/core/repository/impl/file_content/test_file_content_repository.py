@@ -295,28 +295,22 @@ class TestGetMethod:
     ):
         """Test getting entire file content"""
 
-        # Mock download_file to return chunks
-        async def mock_download():
-            class MockFileContent:
-                chunks = AsyncIterator[bytes]
+        # Each part download yields two chunks; downloads happen lazily
+        # while the returned stream is consumed.
+        async def fake_download(message_id, begin, end):
+            async def chunks():
+                yield b"chunk1"
+                yield b"chunk2"
 
-                async def __aiter__(self):
-                    yield b"chunk1"
-                    yield b"chunk2"
+            return mocker.Mock(chunks=chunks())
 
-            return MockFileContent()
+        mock_message_api.download_file.side_effect = fake_download
 
-        mock_message_api.download_file.return_value = await mock_download()
-
-        # Mock ChainedAsyncIterator
-        mock_chained = mocker.patch(
-            "tgfs.core.repository.impl.file_content.ChainedAsyncIterator"
-        )
-
-        await repository.get(sample_file_version, 0, -1, "test.txt")
+        result = await repository.get(sample_file_version, 0, -1, "test.txt")
+        chunks = [chunk async for chunk in result]
 
         assert mock_message_api.download_file.call_count == 2  # Two parts
-        mock_chained.assert_called_once()
+        assert chunks == [b"chunk1", b"chunk2", b"chunk1", b"chunk2"]
 
     @pytest.mark.asyncio
     async def test_get_partial_range(
@@ -324,24 +318,19 @@ class TestGetMethod:
     ):
         """Test getting partial file range"""
 
-        async def mock_download():
-            class MockFileContent:
-                chunks = AsyncIterator[bytes]
+        async def fake_download(message_id, begin, end):
+            async def chunks():
+                yield b"partial"
 
-                async def __aiter__(self):
-                    yield b"partial"
+            return mocker.Mock(chunks=chunks())
 
-            return MockFileContent()
+        mock_message_api.download_file.side_effect = fake_download
 
-        mock_message_api.download_file.return_value = await mock_download()
-        mock_chained = mocker.patch(
-            "tgfs.core.repository.impl.file_content.ChainedAsyncIterator"
-        )
-
-        await repository.get(sample_file_version, 500, 1500, "test.txt")
+        result = await repository.get(sample_file_version, 500, 1500, "test.txt")
+        chunks = [chunk async for chunk in result]
 
         assert mock_message_api.download_file.call_count == 2  # Spans two parts
-        mock_chained.assert_called_once()
+        assert chunks == [b"partial", b"partial"]
 
     @pytest.mark.asyncio
     async def test_get_empty_file(self, repository, mock_message_api, mocker):

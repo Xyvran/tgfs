@@ -1,6 +1,6 @@
 import datetime
 from dataclasses import dataclass, field
-from typing import Iterable, List, Optional, Self
+from typing import Dict, Iterable, List, Optional, Self
 
 from tgfs.errors import FileOrDirectoryAlreadyExists, FileOrDirectoryDoesNotExist
 from tgfs.utils.time import FIRST_DAY_OF_EPOCH, ts
@@ -15,12 +15,19 @@ class TGFSFileRef:
     name: str
     location: "TGFSDirectory" = field(repr=False)
 
+    # Mirror channel id (config string) -> message id of the file
+    # descriptor copy in that channel. Empty when redundancy is off.
+    mirrors: Dict[str, int] = field(default_factory=dict)
+
     def to_dict(self) -> TGFSFileRefSerialized:
-        return TGFSFileRefSerialized(
+        res = TGFSFileRefSerialized(
             type="FR",
             messageId=self.message_id,
             name=self.name,
         )
+        if self.mirrors:
+            res["mirrors"] = self.mirrors
+        return res
 
     def delete(self) -> None:
         self.location.delete_file_ref(self)
@@ -79,7 +86,15 @@ class TGFSDirectory:
 
         if data["files"]:
             d.files = [
-                TGFSFileRef(message_id=file["messageId"], name=file["name"], location=d)
+                TGFSFileRef(
+                    message_id=file["messageId"],
+                    name=file["name"],
+                    location=d,
+                    mirrors={
+                        str(channel): int(mid)
+                        for channel, mid in (file.get("mirrors") or {}).items()
+                    },
+                )
                 for file in data["files"]
                 if file["name"] and file["messageId"]
             ]

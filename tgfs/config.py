@@ -282,6 +282,60 @@ class AccountConfig:
 
 
 @dataclass
+class RedundancyConfig:
+    """RAID-1-style mirroring of file channels.
+
+    ``mirrors`` maps a primary channel id (as listed in
+    ``private_file_channel``) to the channel ids of its mirrors. Every
+    file part uploaded to the primary is copied to each mirror --
+    server-side via message forwarding in ``forward`` mode (no
+    re-upload bandwidth), or by downloading and re-uploading in
+    ``reupload`` mode (for channels with "restrict saving content"
+    enabled, where forwarding is impossible).
+
+    With ``strict: false`` (the default) a failed mirror write is
+    logged and the upload still succeeds; the backfill task can close
+    the gap later. With ``strict: true`` the upload fails.
+    """
+
+    mirrors: Dict[str, List[str]]
+    mode: Literal["forward", "reupload"]
+    strict: bool
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict]) -> Optional["RedundancyConfig"]:
+        if not data:
+            return None
+        raw_mirrors = data.get("mirrors") or {}
+        mirrors: Dict[str, List[str]] = {}
+        for primary, mirror_ids in raw_mirrors.items():
+            if not mirror_ids:
+                continue
+            mirror_list = [str(m) for m in mirror_ids]
+            if str(primary) in mirror_list:
+                raise ValueError(
+                    f"Channel {primary} cannot be configured as its own mirror"
+                )
+            if len(set(mirror_list)) != len(mirror_list):
+                raise ValueError(
+                    f"Duplicate mirror channel for primary channel {primary}"
+                )
+            mirrors[str(primary)] = mirror_list
+        if not mirrors:
+            return None
+        mode = data.get("mode", "forward")
+        if mode not in ("forward", "reupload"):
+            raise ValueError(
+                f"Unknown redundancy mode: {mode}, available options: forward, reupload"
+            )
+        return cls(
+            mirrors=mirrors,
+            mode=mode,
+            strict=bool(data.get("strict", False)),
+        )
+
+
+@dataclass
 class TelegramConfig:
     api_id: int
     api_hash: str
@@ -290,6 +344,7 @@ class TelegramConfig:
     private_file_channel: List[str]
     lib: Literal["pyrogram", "telethon"]
     delete_messages_on_remove: bool
+    redundancy: Optional[RedundancyConfig]
 
     @classmethod
     def from_dict(cls, data: dict) -> "TelegramConfig":
@@ -305,6 +360,7 @@ class TelegramConfig:
             delete_messages_on_remove=bool(
                 data.get("delete_messages_on_remove", False)
             ),
+            redundancy=RedundancyConfig.from_dict(data.get("redundancy")),
         )
 
 

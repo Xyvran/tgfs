@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from typing import List, Optional
@@ -9,6 +10,7 @@ from tgfs.app.fs_cache import gfc
 from tgfs.app.utils import split_global_path
 from tgfs.config import Config
 from tgfs.core import Clients
+from tgfs.core.backfill import backfill_mirrors, count_files, create_backfill_task
 from tgfs.core.ops import Ops
 from tgfs.reqres import MessageRespWithDocument
 from tgfs.tasks import task_store
@@ -49,6 +51,48 @@ def create_manager_app(clients: Clients, config: Config) -> FastAPI:
         if not await task_store.remove_task(task_id):
             raise HTTPException(status_code=404, detail="Task not found")
         return {"message": "Task deleted successfully"}
+
+    @app.get("/redundancy")
+    async def get_redundancy():
+        """Redundancy configuration overview, per client."""
+        redundancy = config.telegram.redundancy
+        return {
+            name: {
+                "mirrors": (client.mirror_group.channel_keys
+                            if client.mirror_group else []),
+                "mode": redundancy.mode if redundancy else None,
+                "strict": redundancy.strict if redundancy else False,
+            }
+            for name, client in clients.items()
+        }
+
+    @app.post("/redundancy/backfill/{client_name}")
+    async def start_backfill(client_name: str, verify: bool = Query(False)):
+        """Mirror all pre-existing, unmirrored data of one client.
+
+        Runs in the background; progress is reported through the regular
+        /tasks endpoints (type ``mirror_backfill``). ``verify=true``
+        additionally checks that recorded mirror copies still exist and
+        re-mirrors any that were deleted.
+        """
+        if (client := clients.get(client_name)) is None:
+            raise HTTPException(status_code=404, detail="Unknown client")
+        if client.mirror_group is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No mirror channels configured for '{client_name}'",
+            )
+
+        task_id = await create_backfill_task(client, count_files(client))
+
+        async def run() -> None:
+            try:
+                await backfill_mirrors(client, verify=verify, task_id=task_id)
+            except Exception:
+                logger.exception(f"Mirror backfill for '{client_name}' crashed")
+
+        asyncio.get_running_loop().create_task(run())
+        return {"task_id": task_id}
 
     async def get_message(channel_id: int, message_id: int) -> MessageRespWithDocument:
         if str(channel_id) not in config.telegram.private_file_channel:

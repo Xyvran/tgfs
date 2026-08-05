@@ -1,13 +1,20 @@
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
-from tgfs.config import EncryptionConfig, MetadataConfig, MetadataType
+from tgfs.config import (
+    EncryptionConfig,
+    MetadataConfig,
+    MetadataType,
+    RedundancyConfig,
+)
 from tgfs.core.api import DirectoryApi, FileApi, FileDescApi, MessageApi, MetaDataApi
+from tgfs.core.mirror import MirrorChannel, MirrorGroup
 from tgfs.core.repository.impl import (
     TGMsgFDRepository,
     TGMsgFileContentRepository,
     TGMsgMetadataRepository,
 )
 from tgfs.core.repository.interface import (
+    IFDRepository,
     IFileContentRepository,
     IMetaDataRepository,
 )
@@ -22,12 +29,18 @@ class Client:
         file_api: FileApi,
         dir_api: DirectoryApi,
         fc_repo: IFileContentRepository,
+        fd_repo: Optional[IFDRepository] = None,
+        metadata_api: Optional[MetaDataApi] = None,
+        mirror_group: Optional[MirrorGroup] = None,
     ):
         self.name = name
         self.message_api = message_api
         self.file_api = file_api
         self.dir_api = dir_api
         self.fc_repo = fc_repo
+        self.fd_repo = fd_repo
+        self.metadata_api = metadata_api
+        self.mirror_group = mirror_group
 
     @classmethod
     async def create(
@@ -37,15 +50,38 @@ class Client:
         tdlib_api: TDLibApi,
         use_account_api_to_upload: bool = False,
         encryption_cfg: Optional[EncryptionConfig] = None,
+        redundancy_cfg: Optional[RedundancyConfig] = None,
     ) -> "Client":
         channel = await tdlib_api.next_bot.resolve_channel_id(channel_id)
         message_api = MessageApi(tdlib_api, channel)
+
+        # One MessageApi per mirror channel; the serialization key stays
+        # the config string (stable across telegram libs), the resolved
+        # id is only used on the wire.
+        mirror_group: Optional[MirrorGroup] = None
+        if redundancy_cfg and (mirror_ids := redundancy_cfg.mirrors.get(channel_id)):
+            mirror_channels: List[MirrorChannel] = []
+            for mirror_id in mirror_ids:
+                resolved = await tdlib_api.next_bot.resolve_channel_id(mirror_id)
+                mirror_channels.append(
+                    MirrorChannel(
+                        key=mirror_id,
+                        message_api=MessageApi(tdlib_api, resolved),
+                    )
+                )
+            mirror_group = MirrorGroup(
+                primary=message_api,
+                channels=mirror_channels,
+                mode=redundancy_cfg.mode,
+                strict=redundancy_cfg.strict,
+            )
 
         fc_repo: IFileContentRepository = TGMsgFileContentRepository(
             message_api,
             use_account_api_to_upload
             and tdlib_api.account is not None
             and (await tdlib_api.account.get_me()).is_premium,
+            mirror_group=mirror_group,
         )
 
         # Wrap the file-content repository in an encryption decorator if
@@ -74,11 +110,11 @@ class Client:
 
                 path_name_key = derive_path_name_key(master.key)
 
-        fd_repo = TGMsgFDRepository(message_api)
+        fd_repo = TGMsgFDRepository(message_api, mirror_group=mirror_group)
 
         if metadata_cfg.type == MetadataType.PINNED_MESSAGE:
             metadata_repo: IMetaDataRepository = TGMsgMetadataRepository(
-                message_api, fc_repo
+                message_api, fc_repo, mirror_group=mirror_group
             )
         else:
             if (github_repo_config := metadata_cfg.github_repo) is None:
@@ -98,7 +134,9 @@ class Client:
         metadata_api = MetaDataApi(metadata_repo)
         await metadata_api.init()
 
-        file_api = FileApi(metadata_api, fd_api, message_api)
+        file_api = FileApi(
+            metadata_api, fd_api, message_api, mirror_group=mirror_group
+        )
         dir_api = DirectoryApi(metadata_api, file_api, message_api)
 
         return cls(
@@ -107,6 +145,9 @@ class Client:
             file_api=file_api,
             dir_api=dir_api,
             fc_repo=fc_repo,
+            fd_repo=fd_repo,
+            metadata_api=metadata_api,
+            mirror_group=mirror_group,
         )
 
 

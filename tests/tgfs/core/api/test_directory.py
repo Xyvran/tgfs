@@ -65,14 +65,15 @@ class TestDirectoryApi:
         sub.create_file_ref("inner.txt", 20)
 
         async def fake_collect(fr: TGFSFileRef):
-            # Real impl returns the FD message id plus version content ids.
+            # Real impl returns the FD message id plus version content ids,
+            # and a per-mirror-channel id map (empty without redundancy).
             if fr.message_id == 10:
-                return [10, 100, 101]
+                return [10, 100, 101], {}
             if fr.message_id == 20:
-                return [20, 200]
-            return []
+                return [20, 200], {}
+            return [], {}
 
-        mock_file_api.collect_message_ids.side_effect = fake_collect
+        mock_file_api.collect_all_message_ids.side_effect = fake_collect
 
         await dir_api.rm_dangerously(root)
 

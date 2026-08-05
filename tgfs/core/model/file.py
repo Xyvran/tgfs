@@ -1,7 +1,7 @@
 import datetime
 import json
 from dataclasses import dataclass, field
-from typing import Iterable, List
+from typing import Dict, Iterable, List
 from uuid import uuid4 as uuid
 
 from tgfs.reqres import SentFileMessage
@@ -25,6 +25,11 @@ class TGFSFileVersion:
     message_ids: List[int] = field(default_factory=list)
     part_sizes: List[int] = field(default_factory=list)  # sizes of each part
 
+    # Mirror channel id (config string) -> message ids of the copies of
+    # each part in that channel, aligned with message_ids. A 0 entry
+    # means "this part has no copy in that channel (yet)".
+    mirrors: Dict[str, List[int]] = field(default_factory=dict)
+
     @property
     def updated_at_timestamp(self) -> int:
         return ts(self.updated_at)
@@ -36,13 +41,18 @@ class TGFSFileVersion:
         return self._size
 
     def to_dict(self) -> dict:
-        return dict(
+        res = dict(
             type="FV",
             id=self.id,
             updatedAt=self.updated_at_timestamp,
             messageIds=self.message_ids,
             size=self.size,
         )
+        # Only serialized when present so pre-redundancy consumers keep
+        # seeing the exact format they always did.
+        if self.mirrors:
+            res["mirrors"] = self.mirrors
+        return res
 
     @staticmethod
     def empty() -> "TGFSFileVersion":
@@ -54,11 +64,15 @@ class TGFSFileVersion:
 
     @staticmethod
     def from_sent_file_message(*messages: SentFileMessage) -> "TGFSFileVersion":
+        mirrors: Dict[str, List[int]] = {}
+        for channel in {ch for msg in messages for ch in msg.mirrors}:
+            mirrors[channel] = [msg.mirrors.get(channel, 0) for msg in messages]
         return TGFSFileVersion(
             id=str(uuid()),
             updated_at=datetime.datetime.now(),
             message_ids=[msg.message_id for msg in messages],
             part_sizes=[msg.size for msg in messages],
+            mirrors=mirrors,
         )
 
     @staticmethod
@@ -78,11 +92,16 @@ class TGFSFileVersion:
             updated_at=updated_at,
             message_ids=message_ids,
             part_sizes=[],  # part sizes are not serialized
+            mirrors={
+                str(channel): list(ids)
+                for channel, ids in (data.get("mirrors") or {}).items()
+            },
         )
 
     def set_invalid(self):
         self.message_ids = []
         self.part_sizes = []
+        self.mirrors = {}
         self._size = INVALID_FILE_SIZE
 
     def is_valid(self) -> bool:

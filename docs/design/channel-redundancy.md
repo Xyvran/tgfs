@@ -1,6 +1,8 @@
 # Design: Channel Redundancy (RAID-1-style Mirroring)
 
-Status: proposal / plan — no implementation yet.
+Status: implemented. This document describes the design; see the code
+for the authoritative behavior (`tgfs/core/mirror.py`,
+`tgfs/core/backfill.py`, and the `redundancy` config block).
 
 ## Goal
 

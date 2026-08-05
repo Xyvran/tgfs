@@ -1,7 +1,7 @@
 import os
 from dataclasses import dataclass, field
 from io import IOBase
-from typing import AsyncIterator, List, Optional, Tuple
+from typing import AsyncIterator, Dict, List, Optional, Tuple
 
 from tgfs.tasks.integrations import TaskTracker
 
@@ -14,6 +14,9 @@ class Message:
 @dataclass
 class SentFileMessage(Message):
     size: int
+    # Message ids of copies of this part in mirror channels, keyed by the
+    # mirror channel id as configured (string). Empty when redundancy is off.
+    mirrors: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -53,6 +56,13 @@ GetMessagesRespNoNone = list[MessageResp]
 @dataclass
 class SearchMessageReq(Chat):
     search: str
+
+
+@dataclass
+class ForwardMessagesReq:
+    from_chat: int
+    to_chat: int
+    message_ids: Tuple[int, ...]
 
 
 @dataclass

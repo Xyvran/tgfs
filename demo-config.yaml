@@ -15,6 +15,34 @@ telegram:
   # The bot account must be an admin of ``private_file_channel`` with the
   # "Delete Messages" permission for this to succeed.
   delete_messages_on_remove: false
+  # ---------------------------------------------------------------------------
+  # Optional channel redundancy (RAID-1-style mirroring).
+  #
+  # ``mirrors`` maps a primary channel id (one of ``private_file_channel``)
+  # to one or more mirror channel ids. Every file part uploaded to the
+  # primary is also copied to each mirror -- server-side via message
+  # forwarding, so no upload bandwidth is spent. If the primary channel is
+  # ever banned or deleted, reads fail over to the mirrors automatically,
+  # and the mirror can be promoted to primary with a pure config change.
+  #
+  # Requirements:
+  #   * your bot(s) must be admin in every mirror channel;
+  #   * the primary channel must not have "Restrict saving content"
+  #     enabled (otherwise use ``mode: reupload``, which is
+  #     bandwidth-bound).
+  #
+  # ``strict: false`` (default): a failed mirror write is logged and the
+  # upload still succeeds; run the backfill task to close gaps later
+  # (Manager API: POST /redundancy/backfill/<channel-name>).
+  # The backfill task also mirrors all files that existed before
+  # redundancy was enabled.
+  #
+  # redundancy:
+  #   mirrors:
+  #     'tgfsdemo':
+  #       - 'tgfsdemomirror'
+  #   mode: forward     # forward (default) | reupload
+  #   strict: false
 tgfs:
   users:
   download:

@@ -57,6 +57,7 @@ class TestMain:
             mock_tdlib_instance,
             mock_config.telegram.account.used_to_upload,
             encryption_cfg=mock_config.tgfs.encryption,
+            redundancy_cfg=mock_config.telegram.redundancy,
         )
         assert result == {"test_client": mock_client}
 
@@ -111,6 +112,7 @@ class TestMain:
             mock_tdlib_instance,
             False,
             encryption_cfg=mock_config.tgfs.encryption,
+            redundancy_cfg=mock_config.telegram.redundancy,
         )
         assert result == {"test_client": mock_client}
 

@@ -9,6 +9,7 @@ from tgfs.reqres import (
     DownloadFileResp,
     EditMessageMediaReq,
     EditMessageTextReq,
+    ForwardMessagesReq,
     GetMeResp,
     GetMessagesReq,
     GetMessagesResp,
@@ -74,6 +75,17 @@ class ITDLibClient(metaclass=ABCMeta):
 
     @abstractmethod
     async def edit_message_media(self, req: EditMessageMediaReq) -> Message:
+        pass
+
+    @abstractmethod
+    async def forward_messages(
+        self, req: ForwardMessagesReq
+    ) -> list[SendMessageResp]:
+        """Server-side copy of messages into another chat.
+
+        Returns the new message ids in ``to_chat``, in the same order as
+        ``req.message_ids``. No file content is re-uploaded.
+        """
         pass
 
     @abstractmethod

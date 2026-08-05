@@ -49,17 +49,27 @@ class DirectoryApi:
         await self.rm_dangerously(directory)
 
     async def rm_dangerously(self, directory: TGFSDirectory) -> None:
-        message_ids = await self.__collect_subtree_message_ids(directory)
+        message_ids, mirror_ids = await self.__collect_subtree_message_ids(directory)
         directory.delete()
         await self.__metadata_api.push()
         await self.__message_api.delete_messages(message_ids)
+        await self.__file_api.delete_mirrored(mirror_ids)
 
     async def __collect_subtree_message_ids(
         self, directory: TGFSDirectory
-    ) -> List[int]:
+    ) -> tuple[List[int], dict[str, List[int]]]:
         ids: List[int] = []
+        mirror_ids: dict[str, List[int]] = {}
         for fr in directory.find_files():
-            ids.extend(await self.__file_api.collect_message_ids(fr))
+            fr_ids, fr_mirror_ids = await self.__file_api.collect_all_message_ids(fr)
+            ids.extend(fr_ids)
+            for channel_key, channel_ids in fr_mirror_ids.items():
+                mirror_ids.setdefault(channel_key, []).extend(channel_ids)
         for child in directory.find_dirs():
-            ids.extend(await self.__collect_subtree_message_ids(child))
-        return ids
+            child_ids, child_mirror_ids = await self.__collect_subtree_message_ids(
+                child
+            )
+            ids.extend(child_ids)
+            for channel_key, channel_ids in child_mirror_ids.items():
+                mirror_ids.setdefault(channel_key, []).extend(channel_ids)
+        return ids, mirror_ids

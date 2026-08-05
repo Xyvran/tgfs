@@ -1,7 +1,8 @@
 import json
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Dict, Optional
 
 from tgfs.core.api import MessageApi
+from tgfs.core.mirror import MirrorGroup
 from tgfs.core.model import TGFSDirectory, TGFSFileVersion, TGFSMetadata
 from tgfs.core.repository.interface import IFileContentRepository, IMetaDataRepository
 from tgfs.errors import (
@@ -18,13 +19,21 @@ from tgfs.reqres import (
 class TGMsgMetadataRepository(IMetaDataRepository):
     METADATA_FILE_NAME = "metadata.json"
 
-    def __init__(self, message_api: MessageApi, fc_repo: IFileContentRepository):
+    def __init__(
+        self,
+        message_api: MessageApi,
+        fc_repo: IFileContentRepository,
+        mirror_group: Optional[MirrorGroup] = None,
+    ):
         super().__init__()
 
         self._message_api = message_api
         self._fc_repo = fc_repo
+        self._mirror_group = mirror_group
 
         self._message_id: Optional[int] = None
+        # Mirror channel id -> message id of the pinned metadata copy there.
+        self._mirror_message_ids: Dict[str, int] = {}
 
     async def push(self) -> None:
         if not self.metadata:
@@ -37,6 +46,14 @@ class TGMsgMetadataRepository(IMetaDataRepository):
                 buffer,
                 self.METADATA_FILE_NAME,
             )
+            # The primary blob was edited in place, so the mirror copies
+            # are stale now: forward the fresh blob, pin it, drop the old
+            # copy. Keeps every mirror channel self-sufficient for a
+            # config-level promotion after the primary is lost.
+            if self._mirror_group:
+                await self._mirror_group.mirror_pinned(
+                    self._message_id, self._mirror_message_ids
+                )
         else:
             resp = await self._fc_repo.save(
                 FileMessageFromBuffer.new(
@@ -47,6 +64,13 @@ class TGMsgMetadataRepository(IMetaDataRepository):
             message_id = resp[0].message_id
             await self._message_api.pin_message(message_id=message_id)
             self._message_id = message_id
+            # fc_repo.save already mirrored the blob into each mirror
+            # channel; adopt those copies (pin them) instead of
+            # forwarding a second time.
+            if self._mirror_group:
+                await self._mirror_group.adopt_pinned(
+                    resp[0].mirrors, self._mirror_message_ids
+                )
 
     @staticmethod
     async def _read_all(async_iter: AsyncIterator[bytes]) -> bytes:

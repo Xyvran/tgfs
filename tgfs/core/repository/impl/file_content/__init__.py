@@ -1,8 +1,9 @@
 import asyncio
 import logging
-from typing import Generator, List
+from typing import Generator, List, Optional
 
 from tgfs.core.api import MessageApi
+from tgfs.core.mirror import MirrorGroup
 from tgfs.core.model import TGFSFileVersion
 from tgfs.core.repository.interface import IFileContentRepository
 from tgfs.errors import TechnicalError
@@ -29,11 +30,17 @@ PART_SIZE_PREMIUM = (
 
 
 class TGMsgFileContentRepository(IFileContentRepository):
-    def __init__(self, message_api: MessageApi, use_account_api_to_upload: bool):
+    def __init__(
+        self,
+        message_api: MessageApi,
+        use_account_api_to_upload: bool,
+        mirror_group: Optional[MirrorGroup] = None,
+    ):
         self._message_api = message_api
         self._use_account_api_to_upload = (
             use_account_api_to_upload and self._message_api.tdlib.account
         )
+        self._mirror_group = mirror_group
 
     async def _send_file(
         self, file_msg: UploadableFileMessage, use_account_api: bool
@@ -91,6 +98,18 @@ class TGMsgFileContentRepository(IFileContentRepository):
                 )
             )
             file_msg.next_part(part_size)
+
+        # Replicate the freshly uploaded parts into the mirror channels.
+        # Server-side forwarding, so this costs one RPC per mirror, not a
+        # second upload. The mapping travels back to the caller inside the
+        # SentFileMessage objects and ends up in TGFSFileVersion.mirrors.
+        if self._mirror_group:
+            mirror_map = await self._mirror_group.mirror_parts(
+                [m.message_id for m in res]
+            )
+            for channel_key, mirror_ids in mirror_map.items():
+                for sent, mirror_id in zip(res, mirror_ids):
+                    sent.mirrors[channel_key] = mirror_id
         return res
 
     async def update(self, message_id: int, buffer: bytes, name: str) -> int:
@@ -123,6 +142,15 @@ class TGMsgFileContentRepository(IFileContentRepository):
     def _get_file_part_to_download(
         fv: TGFSFileVersion, begin: int, end: int
     ) -> Generator[tuple[int, int, int]]:
+        for _, message_id, part_begin, part_end in (
+            TGMsgFileContentRepository._get_file_parts_indexed(fv, begin, end)
+        ):
+            yield message_id, part_begin, part_end
+
+    @staticmethod
+    def _get_file_parts_indexed(
+        fv: TGFSFileVersion, begin: int, end: int
+    ) -> Generator[tuple[int, int, int, int]]:
         if fv.size <= 0:
             return
         if end < 0:
@@ -157,17 +185,83 @@ class TGMsgFileContentRepository(IFileContentRepository):
             part_begin = max(0, begin - offset)
             part_end = min(part_size, end - offset)
             if part_begin < part_end:
-                yield fv.message_ids[i_part], part_begin, part_end
+                yield i_part, fv.message_ids[i_part], part_begin, part_end
             offset += part_size
             i_part += 1
+
+    def _part_sources(
+        self, fv: TGFSFileVersion, part_idx: int, message_id: int
+    ) -> List[tuple[Optional[str], int]]:
+        """Download sources for one part: the primary plus every mirror
+        channel that holds a copy. ``None`` denotes the primary channel.
+
+        While the primary is marked dead (circuit breaker), mirrors are
+        tried first so each read does not pay a doomed primary RPC; the
+        primary stays in the list as the source of last resort.
+        """
+        sources: List[tuple[Optional[str], int]] = [(None, message_id)]
+        if self._mirror_group:
+            for channel_key, mirror_ids in (fv.mirrors or {}).items():
+                if (
+                    self._mirror_group.api_for(channel_key)
+                    and part_idx < len(mirror_ids)
+                    and mirror_ids[part_idx] > 0
+                ):
+                    sources.append((channel_key, mirror_ids[part_idx]))
+            if self._mirror_group.primary_dead() and len(sources) > 1:
+                sources = sources[1:] + sources[:1]
+        return sources
+
+    async def _download_part(
+        self, fv: TGFSFileVersion, part_idx: int, message_id: int, begin: int, end: int
+    ):
+        """Stream one part, failing over to mirror copies on error.
+
+        Failover also works mid-stream: bytes already delivered are
+        skipped by advancing ``begin`` before retrying the next source.
+        """
+        sources = self._part_sources(fv, part_idx, message_id)
+        served = 0
+        last_ex: Optional[Exception] = None
+        for channel_key, mid in sources:
+            api = (
+                self._message_api
+                if channel_key is None
+                else self._mirror_group.api_for(channel_key)  # type: ignore[union-attr]
+            )
+            if api is None:
+                continue
+            try:
+                resp = await api.download_file(mid, begin + served, end)
+                async for chunk in resp.chunks:
+                    yield chunk
+                    served += len(chunk)
+                return
+            except Exception as ex:
+                last_ex = ex
+                if channel_key is None and self._mirror_group:
+                    self._mirror_group.mark_primary_dead()
+                if len(sources) > 1:
+                    logger.warning(
+                        f"Downloading part {part_idx} (message {mid}) from "
+                        f"{'primary' if channel_key is None else f'mirror {channel_key}'} "
+                        f"failed: {ex}. Trying next source."
+                    )
+        if last_ex:
+            raise last_ex
+        raise TechnicalError(
+            f"No download source available for part {part_idx} of {fv.id}"
+        )
 
     async def get(
         self, fv: TGFSFileVersion, begin: int, end: int, name: str
     ) -> FileContent:
         logger.info(f"Retrieving file content for {name}@{fv.id} from {begin} to {end}")
 
-        tasks = []
-        for message_id, begin, end in self._get_file_part_to_download(fv, begin, end):
-            tasks.append(self._message_api.download_file(message_id, begin, end))
-
-        return ChainedAsyncIterator((x.chunks for x in await asyncio.gather(*tasks)))
+        parts = [
+            self._download_part(fv, part_idx, message_id, part_begin, part_end)
+            for part_idx, message_id, part_begin, part_end in (
+                self._get_file_parts_indexed(fv, begin, end)
+            )
+        ]
+        return ChainedAsyncIterator(parts)

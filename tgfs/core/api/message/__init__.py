@@ -17,6 +17,7 @@ from tgfs.reqres import (
     DownloadFileReq,
     DownloadFileResp,
     EditMessageTextReq,
+    ForwardMessagesReq,
     GetPinnedMessageReq,
     MessageResp,
     MessageRespWithDocument,
@@ -98,7 +99,24 @@ class MessageApi(MessageBroker):
             text="",
         )
 
-    async def delete_messages(self, message_ids: Iterable[int]) -> None:
+    async def forward_messages_from(
+        self, source_channel: int, message_ids: List[int]
+    ) -> List[int]:
+        """Server-side copy of messages from ``source_channel`` into this
+        channel. Returns the new message ids, aligned with the input."""
+        self.__try_acquire("MessageApi.forward_messages_from")
+        resp = await self.tdlib.next_bot.forward_messages(
+            ForwardMessagesReq(
+                from_chat=source_channel,
+                to_chat=self.private_file_channel,
+                message_ids=tuple(message_ids),
+            )
+        )
+        return [m.message_id for m in resp]
+
+    async def delete_messages(
+        self, message_ids: Iterable[int], force: bool = False
+    ) -> None:
         """Best-effort deletion of channel messages.
 
         Gated by ``telegram.delete_messages_on_remove`` so the default
@@ -106,8 +124,13 @@ class MessageApi(MessageBroker):
         channel) is unchanged. Failures are logged but never raised --
         the caller has already committed the metadata change and we do
         not want a delete error to roll that back.
+
+        ``force=True`` bypasses the config gate; it is used for internal
+        bookkeeping messages (e.g. a superseded mirrored metadata blob)
+        that should never linger regardless of the user's preference for
+        keeping removed *file* messages.
         """
-        if not get_config().telegram.delete_messages_on_remove:
+        if not force and not get_config().telegram.delete_messages_on_remove:
             return
         unique_ids: List[int] = list({mid for mid in message_ids if mid > 0})
         if not unique_ids:

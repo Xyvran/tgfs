@@ -106,6 +106,7 @@ class TestFileApi:
         mocker,
     ):
         mock_response = mocker.Mock()
+        mock_response.mirrors = {}
         mock_response.message_id = 456
         mock_response.fd = mocker.Mock(spec=TGFSFileDesc)
         mock_file_desc_api.create_file_desc.return_value = mock_response
@@ -121,26 +122,27 @@ class TestFileApi:
         assert result == mock_response.fd
 
     @pytest.mark.asyncio
-    async def test_update_file_ref_message_id_if_necessary_no_update(
-        self, file_api, mock_metadata_api, sample_file_ref
+    async def test_sync_file_ref_no_update(
+        self, file_api, mock_metadata_api, sample_file_ref, mocker
     ):
-        current_message_id = sample_file_ref.message_id
+        resp = mocker.Mock()
+        resp.message_id = sample_file_ref.message_id
+        resp.mirrors = dict(sample_file_ref.mirrors)
 
-        await file_api._update_file_ref_message_id_if_necessary(
-            sample_file_ref, current_message_id
-        )
+        await file_api._sync_file_ref(sample_file_ref, resp)
 
         mock_metadata_api.push.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_update_file_ref_message_id_if_necessary_with_update(
-        self, file_api, mock_metadata_api, sample_file_ref
+    async def test_sync_file_ref_with_update(
+        self, file_api, mock_metadata_api, sample_file_ref, mocker
     ):
         new_message_id = 999
+        resp = mocker.Mock()
+        resp.message_id = new_message_id
+        resp.mirrors = {}
 
-        await file_api._update_file_ref_message_id_if_necessary(
-            sample_file_ref, new_message_id
-        )
+        await file_api._sync_file_ref(sample_file_ref, resp)
 
         assert sample_file_ref.message_id == new_message_id
         mock_metadata_api.push.assert_called_once()
@@ -151,6 +153,7 @@ class TestFileApi:
     ):
         version_id = "v2"
         mock_response = mocker.Mock()
+        mock_response.mirrors = {}
         mock_response.message_id = (
             sample_file_ref.message_id
         )  # Same ID, no update needed
@@ -172,6 +175,7 @@ class TestFileApi:
         self, file_api, mock_file_desc_api, sample_file_ref, sample_file_message, mocker
     ):
         mock_response = mocker.Mock()
+        mock_response.mirrors = {}
         mock_response.message_id = (
             sample_file_ref.message_id
         )  # Same ID, no update needed
@@ -229,6 +233,7 @@ class TestFileApi:
     ):
         version_id = "v1"
         mock_response = mocker.Mock()
+        mock_response.mirrors = {}
         mock_response.message_id = (
             sample_file_ref.message_id
         )  # Same ID, no update needed
@@ -263,6 +268,7 @@ class TestFileApi:
         )
 
         mock_response = mocker.Mock()
+        mock_response.mirrors = {}
         mock_response.message_id = 789
         mock_response.fd = mocker.Mock(spec=TGFSFileDesc)
         mock_file_desc_api.create_file_desc.return_value = mock_response
@@ -286,6 +292,7 @@ class TestFileApi:
         sample_directory.find_file = mocker.Mock(return_value=sample_file_ref)
 
         mock_response = mocker.Mock()
+        mock_response.mirrors = {}
         mock_response.message_id = (
             sample_file_ref.message_id
         )  # Same ID, no update needed
@@ -317,6 +324,7 @@ class TestFileApi:
         sample_directory.create_file_ref = mocker.Mock()
 
         mock_response = mocker.Mock()
+        mock_response.mirrors = {}
         mock_response.message_id = 789
         mock_response.fd = mocker.Mock(spec=TGFSFileDesc)
         mock_file_desc_api.create_file_desc.return_value = mock_response
@@ -510,6 +518,7 @@ class TestFileApi:
         sample_directory.find_file = mocker.Mock(return_value=sample_file_ref)
 
         mock_response = mocker.Mock()
+        mock_response.mirrors = {}
         mock_response.message_id = (
             sample_file_ref.message_id
         )  # Same ID, no update needed
@@ -533,6 +542,7 @@ class TestFileApi:
         version_id = "v1"
         new_message_id = 999
         mock_response = mocker.Mock()
+        mock_response.mirrors = {}
         mock_response.message_id = new_message_id  # Different ID, update needed
         mock_file_desc_api.delete_file_version.return_value = mock_response
 
@@ -565,6 +575,7 @@ class TestFileApi:
     ):
         new_message_id = 888
         mock_response = mocker.Mock()
+        mock_response.mirrors = {}
         mock_response.message_id = new_message_id  # Different ID, update needed
         mock_response.fd = mocker.Mock(spec=TGFSFileDesc)
         mock_file_desc_api.append_file_version.return_value = mock_response

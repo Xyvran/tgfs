@@ -30,7 +30,55 @@ Refer to the [wiki page](https://github.com/TheodoreKrypton/tgfs/wiki/TGFS-Wiki)
 * File size is unlimited (larger files are chunked into parts but appear as a single file to the user)
 * Live streaming of videos
 * **Optional at-rest encryption** (AES-256-GCM, see below)
+* **Optional channel redundancy** (RAID-1-style mirroring to extra channels, see below)
 
+
+## Channel redundancy
+
+Telegram channels can be banned or deleted, taking every stored file with
+them. With redundancy enabled, TGFS keeps a full copy of everything in one
+or more *mirror channels*:
+
+* **Mirroring is server-side.** New uploads are copied to the mirrors via
+  Telegram's message forwarding — no re-upload, one API call per file part.
+* **Reads fail over automatically.** If a part (or the whole primary
+  channel) becomes unavailable, downloads are served from a mirror.
+* **File descriptors are mirrored too**, and in `pinned_message` metadata
+  mode a pinned copy of the metadata blob is maintained in every mirror,
+  so a mirror channel is self-sufficient: if the primary is banned, swap
+  the mirror in as `private_file_channel` in the config and keep going.
+* **Pre-existing files are covered by the backfill task**
+  (`POST /redundancy/backfill/<channel-name>` on the manager API, progress
+  via the regular `/tasks` endpoints; add `?verify=true` to also re-mirror
+  copies that were manually deleted). Backfill forwards server-side as
+  well, so mirroring a multi-terabyte library costs API calls, not
+  bandwidth.
+* **Works with encryption**: mirrors receive the ciphertext messages
+  including the inline header, so files remain decryptable from a mirror
+  alone.
+
+Set up:
+
+```yaml
+telegram:
+  private_file_channel:
+    - '1234567890'
+  redundancy:
+    mirrors:
+      '1234567890':      # primary channel id
+        - '9876543210'   # mirror channel id(s)
+    mode: forward        # forward (default) | reupload
+    strict: false        # true: uploads fail when mirroring fails
+```
+
+Requirements: the bot(s) must be admin in every mirror channel, and the
+primary channel must not have "Restrict saving content" enabled —
+otherwise set `mode: reupload` (bandwidth-bound). With `strict: false`
+(default) a failing mirror never fails the upload; gaps are logged and can
+be closed by re-running the backfill task.
+
+When redundancy matters to you, prefer the `github_repo` metadata type:
+the directory tree then survives even the loss of *all* channels.
 
 ## At-rest encryption
 

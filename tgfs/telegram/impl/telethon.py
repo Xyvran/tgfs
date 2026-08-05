@@ -20,6 +20,7 @@ from tgfs.reqres import (
     DownloadFileResp,
     EditMessageMediaReq,
     EditMessageTextReq,
+    ForwardMessagesReq,
     GetMeResp,
     GetMessagesReq,
     GetMessagesResp,
@@ -216,6 +217,25 @@ class TelethonAPI(ITDLibClient):
         if not isinstance(message, tlt.Message):
             raise TechnicalError("Unexpected response type from send_file")
         return SendMessageResp(message_id=message.id)
+
+    async def forward_messages(
+        self, req: ForwardMessagesReq
+    ) -> list[SendMessageResp]:
+        forwarded = await self._client.forward_messages(
+            entity=PeerChannel(channel_id=req.to_chat),
+            messages=list(req.message_ids),
+            from_peer=PeerChannel(channel_id=req.from_chat),
+        )
+        if isinstance(forwarded, tlt.Message):
+            forwarded = [forwarded]
+        if len(forwarded) != len(req.message_ids) or any(
+            m is None for m in forwarded
+        ):
+            raise TechnicalError(
+                f"Forwarding {len(req.message_ids)} messages from {req.from_chat} "
+                f"to {req.to_chat} returned {len(forwarded)} messages"
+            )
+        return [SendMessageResp(message_id=m.id) for m in forwarded]
 
     async def download_file(self, req: DownloadFileReq) -> DownloadFileResp:
         messages = await self.__get_messages(

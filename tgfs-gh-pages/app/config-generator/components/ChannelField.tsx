@@ -1,4 +1,4 @@
-import { Delete } from "@mui/icons-material";
+import { Add, Delete } from "@mui/icons-material";
 import {
   Box,
   Button,
@@ -15,6 +15,7 @@ interface ChannelConfig {
   id: string;
   name: string;
   type: "pinned_message" | "github_repo";
+  mirrors: string[];
   github_repo?: {
     repo: string;
     commit: string;
@@ -33,6 +34,11 @@ interface ChannelFieldProps {
   onDelete?: () => void;
   canDelete: boolean;
   nameErrors?: string[];
+  redundancyEnabled?: boolean;
+  mirrorErrors?: string[][];
+  onAddMirror?: () => void;
+  onRemoveMirror?: (mirrorIndex: number) => void;
+  onUpdateMirror?: (mirrorIndex: number, value: string) => void;
 }
 
 export function ChannelField({
@@ -42,6 +48,11 @@ export function ChannelField({
   onDelete,
   canDelete,
   nameErrors = [],
+  redundancyEnabled = false,
+  mirrorErrors = [],
+  onAddMirror,
+  onRemoveMirror,
+  onUpdateMirror,
 }: ChannelFieldProps) {
   return (
     <Box sx={{ mb: 2 }}>
@@ -142,6 +153,54 @@ export function ChannelField({
               conflict.
             </li>
           </Box>
+        </Box>
+      )}
+
+      {/* Mirror channels (only when redundancy is enabled) */}
+      {redundancyEnabled && (
+        <Box sx={{ mb: 2, pl: 2 }}>
+          <Typography variant="subtitle2" sx={{ mb: 1 }}>
+            Mirror Channels
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+            Every file uploaded to this channel is also copied to each
+            mirror channel (server-side forwarding, no extra upload
+            bandwidth). Your bot(s) must be admin in every mirror channel,
+            and this channel must not have &quot;Restrict saving
+            content&quot; enabled — otherwise switch the redundancy mode
+            to &quot;reupload&quot;.
+          </Typography>
+          {(channel.mirrors || []).map((mirror, mirrorIndex) => (
+            <Box
+              key={mirrorIndex}
+              sx={{ display: "flex", alignItems: "flex-start", gap: 1, mb: 1 }}
+            >
+              <ConfigTextField
+                label={`Mirror Channel ID ${mirrorIndex + 1}`}
+                value={mirror}
+                onChange={(e) => onUpdateMirror?.(mirrorIndex, e.target.value)}
+                error={(mirrorErrors[mirrorIndex] || []).length > 0}
+                helperText={(mirrorErrors[mirrorIndex] || []).join("; ")}
+                style={{ flex: 1 }}
+              />
+              <IconButton
+                color="error"
+                onClick={() => onRemoveMirror?.(mirrorIndex)}
+                sx={{ mt: 0.5 }}
+                size="small"
+              >
+                <Delete />
+              </IconButton>
+            </Box>
+          ))}
+          <Button
+            startIcon={<Add />}
+            onClick={() => onAddMirror?.()}
+            variant="outlined"
+            size="small"
+          >
+            Add Mirror Channel
+          </Button>
         </Box>
       )}
 
