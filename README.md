@@ -3,7 +3,7 @@
 </p>
 
 [![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=for-the-badge&logo=docker&logoColor=white)](https://hub.docker.com/r/xyvran/tgfs)
-[![Telegram Group](https://img.shields.io/badge/telegram-group-blue?style=for-the-badge&logo=telegram)](https://t.me/+kVYjpmGR5gthM2My)
+[![Telegram Group](https://img.shields.io/badge/telegram-group-blue?style=for-the-badge&logo=telegram)](https://t.me/+vhZW50O-LVliNzE6)
 [![Telegram Mini App](https://img.shields.io/badge/telegram-miniapp-blue?style=for-the-badge&logo=telegram)](https://xyvran.github.io/tgfs/telegram-mini-app)
 [![Tests](https://img.shields.io/github/actions/workflow/status/Xyvran/tgfs/test.yml?branch=master&style=for-the-badge&label=tests)](https://github.com/Xyvran/tgfs/actions/workflows/test.yml)
 [![Docker build](https://img.shields.io/github/actions/workflow/status/Xyvran/tgfs/docker-publish.yml?branch=master&style=for-the-badge&label=docker%20build)](https://github.com/Xyvran/tgfs/actions/workflows/docker-publish.yml)
