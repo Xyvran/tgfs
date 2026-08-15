@@ -6,8 +6,8 @@ import React from "react";
 
 export default function JoinGroup() {
   const [success, setSuccess] = React.useState(false);
-  const name1 = "+kVYjpmG**";
-  const name2 = "*R5gthM2My";
+  const name1 = "+vhZW50O**";
+  const name2 = "*-LVliNzE6";
 
   return (
     <div style={{ textAlign: "center", marginTop: "20px" }}>
