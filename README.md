@@ -251,7 +251,7 @@ container -- never hard-code it into the image:
 
 ```bash
 docker run -e TGFS_MASTER_PASSPHRASE \
-  -v ~/.tgfs:/root/.tgfs \
+  -v ~/.tgfs:/home/tgfs/.tgfs \
   xyvran/tgfs
 ```
 
@@ -263,7 +263,7 @@ services:
     environment:
       TGFS_MASTER_PASSPHRASE: ${TGFS_MASTER_PASSPHRASE}
     volumes:
-      - ~/.tgfs:/root/.tgfs
+      - ~/.tgfs:/home/tgfs/.tgfs
 ```
 
 Keep the actual value in a ``.env`` file next to ``docker-compose.yml``
