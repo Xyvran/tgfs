@@ -216,6 +216,84 @@ class ServerConfig:
 
 
 @dataclass
+class SFTPConfig:
+    """Optional SFTP interface, served next to the HTTP/WebDAV surface.
+
+    It exposes the very same virtual file tree and reuses ``tgfs.users``,
+    so a readonly user stays readonly here as well. SSH cannot share the
+    HTTP socket, hence the separate ``port``.
+
+    ``host_key_file`` is created on first start (ed25519, mode 0600) when
+    it is missing. Back it up: without it every restart presents a new
+    host key and clients refuse to connect until their known_hosts entry
+    is cleared.
+
+    ``authorized_keys_dir`` optionally enables public key authentication.
+    It holds one file per user, named after the username and written in
+    the usual ``authorized_keys`` format. The user must still exist in
+    ``tgfs.users`` so the readonly flag keeps applying.
+
+    ``upload_buffer_size_mb`` is how much of an incoming upload is kept in
+    memory before it spills over to ``upload_buffer_dir`` (the system temp
+    directory when empty). SFTP never announces the file size up front
+    while Telegram uploads need it, so a whole file has to be buffered
+    before it can be sent.
+    """
+
+    enabled: bool
+    host: str
+    port: int
+    host_key_file: str
+    authorized_keys_dir: Optional[str]
+    upload_buffer_size_mb: int
+    upload_buffer_dir: Optional[str]
+
+    DEFAULT_PORT = 2222
+    DEFAULT_HOST_KEY_FILE = "sftp_host_key"
+    DEFAULT_UPLOAD_BUFFER_SIZE_MB = 64
+
+    @property
+    def upload_buffer_size_bytes(self) -> int:
+        return self.upload_buffer_size_mb * 1024 * 1024
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict]) -> "SFTPConfig":
+        data = data or {}
+
+        port = int(data.get("port", cls.DEFAULT_PORT))
+        if not 1 <= port <= 65535:
+            raise ValueError(f"sftp.port must be between 1 and 65535, got {port}")
+
+        buffer_size_mb = int(
+            data.get("upload_buffer_size_mb", cls.DEFAULT_UPLOAD_BUFFER_SIZE_MB)
+        )
+        if buffer_size_mb < 0:
+            raise ValueError(
+                f"sftp.upload_buffer_size_mb must not be negative, got {buffer_size_mb}"
+            )
+
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            host=str(data.get("host", "0.0.0.0")),  # noqa: S104
+            port=port,
+            host_key_file=expand_path(
+                data.get("host_key_file") or cls.DEFAULT_HOST_KEY_FILE
+            ),
+            authorized_keys_dir=(
+                expand_path(data["authorized_keys_dir"])
+                if data.get("authorized_keys_dir")
+                else None
+            ),
+            upload_buffer_size_mb=buffer_size_mb,
+            upload_buffer_dir=(
+                expand_path(data["upload_buffer_dir"])
+                if data.get("upload_buffer_dir")
+                else None
+            ),
+        )
+
+
+@dataclass
 class TGFSConfig:
     users: dict[str, UserConfig]
     download: DownloadConfig
@@ -223,6 +301,7 @@ class TGFSConfig:
     metadata: Dict[str, MetadataConfig]
     server: ServerConfig
     encryption: EncryptionConfig
+    sftp: SFTPConfig
 
     @classmethod
     def from_dict(cls, data: Dict) -> Self:
@@ -244,6 +323,7 @@ class TGFSConfig:
             },
             server=ServerConfig.from_dict(data["server"]),
             encryption=EncryptionConfig.from_dict(data.get("encryption")),
+            sftp=SFTPConfig.from_dict(data.get("sftp")),
         )
 
 
