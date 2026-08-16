@@ -47,7 +47,11 @@ EXPOSE 1900
 # SFTP, when tgfs.sftp.enabled is set in the config
 EXPOSE 2222
 
-ENV DATA_DIR=/home/tgfs/.tgfs
+# The application reads TGFS_DATA_DIR. Pin it so the data directory does not
+# depend on HOME or on the passwd entry of whatever user the container runs as
+# -- without it, `--user <uid with no passwd entry>` makes Python's expanduser
+# return "~/.tgfs" literally and the config is looked for under /app/~/.tgfs.
+ENV TGFS_DATA_DIR=/home/tgfs/.tgfs
 
 # Run the application
 CMD ["python", "main.py"]

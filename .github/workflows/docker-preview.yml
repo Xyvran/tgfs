@@ -79,6 +79,31 @@ jobs:
             "${{ steps.prep.outputs.image }}" \
             python scripts/docker_smoke_check.py
 
+      # An environment variable named wrong in the image is invisible to every
+      # test in the suite -- it lives in the image, not in the code -- so check
+      # it where it can be observed. The second run uses a uid with no passwd
+      # entry, as `docker run --user $(id -u)` gives on most hosts: the whole
+      # point of pinning the path is that it holds whoever the container runs
+      # as, instead of being derived from HOME or a passwd lookup.
+      - name: Check the image pins its data directory
+        if: matrix.name == 'tgfs'
+        env:
+          EXPECTED: /home/tgfs/.tgfs
+        run: |
+          probe() {
+            docker run --rm "$@" "${{ steps.prep.outputs.image }}" \
+              python -c "from tgfs.config import DATA_DIR; print(DATA_DIR)"
+          }
+          for args in "" "--user 12345"; do
+            # shellcheck disable=SC2086
+            actual=$(probe $args)
+            echo "data dir with '${args:-default user}': $actual"
+            if [ "$actual" != "$EXPECTED" ]; then
+              echo "::error::expected $EXPECTED, got $actual"
+              exit 1
+            fi
+          done
+
       - name: Smoke test the frontend
         if: matrix.name == 'tgfs-fe'
         run: |
