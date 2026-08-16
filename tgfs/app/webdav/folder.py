@@ -3,6 +3,7 @@ from typing import Mapping, Tuple
 from asgidav.folder import Folder as _Folder
 from asgidav.member import Member
 from tgfs.app.fs_cache import FSCache, gfc
+from tgfs.app.utils import strip_webdav_prefix
 from tgfs.core import Client, Ops
 from tgfs.utils.time import FIRST_DAY_OF_EPOCH, ts
 
@@ -82,13 +83,18 @@ class Folder(_Folder):
         self.fs_cache.reset_parent(self.__relative_path)
         await self.__ops.rm_dir(self.__relative_path.rstrip("/"), True)
 
+    def _remove_prefix(self, destination: str) -> str:
+        return strip_webdav_prefix(destination, self.__client.name)
+
     async def copy_to(self, destination: str) -> None:
+        destination = self._remove_prefix(destination)
         self.fs_cache.reset_parent(destination)
         await self.__ops.cp_dir(
             self.__relative_path.rstrip("/"), destination.rstrip("/")
         )
 
     async def move_to(self, destination: str) -> None:
+        destination = self._remove_prefix(destination)
         self.fs_cache.reset_parent(self.__relative_path)
         self.fs_cache.reset_parent(destination)
         await self.__ops.mv_dir(

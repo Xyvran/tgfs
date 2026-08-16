@@ -122,14 +122,34 @@ class Ops:
             await self._client.file_api.upload(d, FileMessageEmpty.new(name=basename))
 
     async def mv_dir(self, path_from: str, path_to: str) -> TGFSDirectory:
-        dir_from, dir_to = await self.cp_dir(path_from, path_to)
-        await self._client.dir_api.rm_dangerously(dir_from)
-        return dir_to
+        self._validate_path(path_from)
+
+        dirname_from, basename_from = os.path.dirname(path_from), os.path.basename(
+            path_from
+        )
+        dir_to_move = self.cd(dirname_from).find_dir(basename_from)
+
+        dirname_to, basename_to = os.path.dirname(path_to), os.path.basename(path_to)
+        d2 = self.cd(dirname_to)
+
+        return await self._client.dir_api.move(
+            dir_to_move, d2, basename_to or basename_from
+        )
 
     async def mv_file(self, path_from: str, path_to: str) -> TGFSFileRef:
-        file_from, file_to = await self.cp_file(path_from, path_to)
-        await self._client.file_api.rm(file_from)
-        return file_to
+        self._validate_path(path_from)
+
+        dirname_from, basename_from = os.path.dirname(path_from), os.path.basename(
+            path_from
+        )
+        file_to_move = self.cd(dirname_from).find_file(basename_from)
+
+        dirname_to, basename_to = os.path.dirname(path_to), os.path.basename(path_to)
+        d2 = self.cd(dirname_to)
+
+        return await self._client.file_api.move(
+            file_to_move, d2, basename_to or basename_from
+        )
 
     async def rm_dir(self, path: str, recursive: bool) -> TGFSDirectory:
         self._validate_path(path)

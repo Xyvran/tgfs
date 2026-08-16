@@ -6,7 +6,7 @@ from tgfs.core.api.file_desc import FileDescApi
 from tgfs.core.api.message import MessageApi
 from tgfs.core.api.metadata import MetaDataApi
 from tgfs.core.model import TGFSDirectory, TGFSFileDesc, TGFSFileRef, TGFSFileVersion
-from tgfs.errors import FileOrDirectoryDoesNotExist
+from tgfs.errors import FileOrDirectoryAlreadyExists, FileOrDirectoryDoesNotExist
 from tgfs.reqres import (
     FileMessage,
     FileMessageEmpty,
@@ -591,3 +591,111 @@ class TestFileApi:
         assert sample_file_ref.message_id == new_message_id
         mock_metadata_api.push.assert_called_once()
         assert result == mock_response.fd
+
+    @pytest.mark.asyncio
+    async def test_move_relocates_ref_without_deleting_messages(
+        self, file_api, mock_metadata_api, mock_message_api
+    ):
+        root = TGFSDirectory.root_dir()
+        src = root.create_dir("src", None)
+        dest = root.create_dir("dest", None)
+        fr = src.create_file_ref("test_file.txt", 123)
+        fr.mirrors = {"-100": 456}
+
+        moved = await file_api.move(fr, dest)
+
+        assert dest.find_file("test_file.txt") is moved
+        assert src.find_files() == []
+        # Same descriptor message, so the content stays reachable and the
+        # reported size does not change.
+        assert moved.message_id == 123
+        assert moved.mirrors == {"-100": 456}
+        mock_metadata_api.push.assert_called_once()
+        mock_message_api.delete_messages.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_move_can_rename(self, file_api):
+        root = TGFSDirectory.root_dir()
+        src = root.create_dir("src", None)
+        dest = root.create_dir("dest", None)
+        fr = src.create_file_ref("test_file.txt", 123)
+
+        moved = await file_api.move(fr, dest, "renamed.txt")
+
+        assert dest.find_file("renamed.txt") is moved
+        assert moved.message_id == 123
+
+    @pytest.mark.asyncio
+    async def test_move_onto_itself_is_a_noop(self, file_api, mock_metadata_api):
+        root = TGFSDirectory.root_dir()
+        src = root.create_dir("src", None)
+        fr = src.create_file_ref("test_file.txt", 123)
+
+        assert await file_api.move(fr, src) is fr
+        assert src.find_files() == [fr]
+
+    @pytest.mark.asyncio
+    async def test_move_rejects_an_occupied_destination(self, file_api):
+        root = TGFSDirectory.root_dir()
+        src = root.create_dir("src", None)
+        dest = root.create_dir("dest", None)
+        fr = src.create_file_ref("test_file.txt", 123)
+        dest.create_file_ref("test_file.txt", 456)
+
+        with pytest.raises(FileOrDirectoryAlreadyExists):
+            await file_api.move(fr, dest)
+
+        # The source is untouched, so nothing is lost.
+        assert src.find_file("test_file.txt") is fr
+
+    @pytest.mark.asyncio
+    async def test_rm_keeps_messages_shared_with_a_copy(
+        self,
+        file_api,
+        mock_metadata_api,
+        mock_message_api,
+        mock_file_desc_api,
+    ):
+        root = TGFSDirectory.root_dir()
+        mock_metadata_api.get_root_directory.return_value = root
+        src = root.create_dir("src", None)
+        dest = root.create_dir("dest", None)
+        original = src.create_file_ref("test_file.txt", 123)
+        copy = await file_api.copy(dest, original)
+
+        await file_api.rm(original)
+
+        assert src.find_files() == []
+        assert dest.find_file("test_file.txt") is copy
+        # The copy points at the same descriptor, so nothing may be deleted.
+        mock_file_desc_api.get_file_desc.assert_not_called()
+        mock_message_api.delete_messages.assert_called_once_with([])
+
+    @pytest.mark.asyncio
+    async def test_rm_deletes_messages_of_the_last_reference(
+        self,
+        file_api,
+        mock_metadata_api,
+        mock_message_api,
+        mock_file_desc_api,
+        mocker,
+    ):
+        root = TGFSDirectory.root_dir()
+        mock_metadata_api.get_root_directory.return_value = root
+        src = root.create_dir("src", None)
+        fr = src.create_file_ref("test_file.txt", 123)
+
+        fd = mocker.Mock(spec=TGFSFileDesc)
+        fd.get_versions.return_value = [
+            TGFSFileVersion(
+                id="v1",
+                updated_at=datetime.datetime.now(),
+                message_ids=[200, 201],
+            )
+        ]
+        mock_file_desc_api.get_file_desc.return_value = fd
+
+        await file_api.rm(fr)
+
+        deleted_ids = mock_message_api.delete_messages.call_args[0][0]
+        assert sorted(deleted_ids) == [123, 200, 201]

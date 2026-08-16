@@ -37,9 +37,10 @@ class TestDirectoryApi:
 
     @pytest.mark.asyncio
     async def test_rm_empty_directory_no_messages_to_delete(
-        self, dir_api, mock_metadata_api, mock_message_api
+        self, dir_api, mock_metadata_api, mock_file_api, mock_message_api
     ):
         empty_dir = TGFSDirectory.root_dir()
+        mock_file_api.collect_deletable_message_ids.return_value = ([], {})
 
         await dir_api.rm_empty(empty_dir)
 
@@ -64,20 +65,58 @@ class TestDirectoryApi:
         sub = root.create_dir("sub", None)
         sub.create_file_ref("inner.txt", 20)
 
-        async def fake_collect(fr: TGFSFileRef):
-            # Real impl returns the FD message id plus version content ids,
-            # and a per-mirror-channel id map (empty without redundancy).
-            if fr.message_id == 10:
-                return [10, 100, 101], {}
-            if fr.message_id == 20:
-                return [20, 200], {}
-            return [], {}
+        async def fake_collect(frs: list[TGFSFileRef]):
+            # Real impl returns, for every ref whose messages are not shared
+            # with a file outside the subtree, the FD message id plus the
+            # version content ids and a per-mirror-channel id map.
+            ids = []
+            for fr in frs:
+                if fr.message_id == 10:
+                    ids.extend([10, 100, 101])
+                elif fr.message_id == 20:
+                    ids.extend([20, 200])
+            return ids, {}
 
-        mock_file_api.collect_all_message_ids.side_effect = fake_collect
+        mock_file_api.collect_deletable_message_ids.side_effect = fake_collect
 
         await dir_api.rm_dangerously(root)
+
+        collected = mock_file_api.collect_deletable_message_ids.call_args[0][0]
+        assert sorted(fr.message_id for fr in collected) == [10, 20]
 
         mock_metadata_api.push.assert_called_once()
         mock_message_api.delete_messages.assert_called_once()
         deleted = mock_message_api.delete_messages.call_args[0][0]
         assert sorted(deleted) == [10, 20, 100, 101, 200]
+
+    @pytest.mark.asyncio
+    async def test_move_reparents_without_touching_messages(
+        self, dir_api, mock_metadata_api, mock_message_api
+    ):
+        root = TGFSDirectory.root_dir()
+        src = root.create_dir("src", None)
+        dest = root.create_dir("dest", None)
+        moved_me = src.create_dir("moved_me", None)
+        moved_me.create_file_ref("inner.txt", 20)
+
+        result = await dir_api.move(moved_me, dest)
+
+        assert result is moved_me
+        assert moved_me.parent is dest
+        assert dest.find_dir("moved_me") is moved_me
+        assert src.find_dirs() == []
+        # The subtree still points at the very same descriptor message.
+        assert moved_me.find_file("inner.txt").message_id == 20
+        mock_metadata_api.push.assert_called_once()
+        mock_message_api.delete_messages.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_move_can_rename(self, dir_api):
+        root = TGFSDirectory.root_dir()
+        src = root.create_dir("src", None)
+        dest = root.create_dir("dest", None)
+
+        await dir_api.move(src, dest, "renamed")
+
+        assert dest.find_dir("renamed") is src
+        assert src.name == "renamed"

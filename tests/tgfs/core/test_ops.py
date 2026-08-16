@@ -295,33 +295,47 @@ class TestOps:
 
     @pytest.mark.asyncio
     async def test_mv_dir(self, ops, mocker):
-        mock_source_dir = mocker.Mock(spec=TGFSDirectory)
-        mock_dest_dir = mocker.Mock(spec=TGFSDirectory)
+        mock_source_parent = mocker.Mock(spec=TGFSDirectory)
+        mock_dir_to_move = mocker.Mock(spec=TGFSDirectory)
+        mock_source_parent.find_dir.return_value = mock_dir_to_move
+        mock_dest_parent = mocker.Mock(spec=TGFSDirectory)
 
-        ops._client.dir_api.rm_dangerously = mocker.AsyncMock()
+        ops._client.dir_api.move = mocker.AsyncMock(return_value=mock_dir_to_move)
 
         mocker.patch.object(
-            ops, "cp_dir", return_value=(mock_source_dir, mock_dest_dir)
+            ops, "cd", side_effect=[mock_source_parent, mock_dest_parent]
         )
-        result = await ops.mv_dir("/src/dir", "/dest/dir")
+        result = await ops.mv_dir("/src/dir", "/dest/renamed")
 
-        ops._client.dir_api.rm_dangerously.assert_called_once_with(mock_source_dir)
-        assert result == mock_dest_dir
+        mock_source_parent.find_dir.assert_called_once_with("dir")
+        # A move must relocate the directory, never copy it and delete the
+        # original -- the copy shares the original's telegram messages.
+        ops._client.dir_api.rm_dangerously.assert_not_called()
+        ops._client.dir_api.move.assert_called_once_with(
+            mock_dir_to_move, mock_dest_parent, "renamed"
+        )
+        assert result == mock_dir_to_move
 
     @pytest.mark.asyncio
     async def test_mv_file(self, ops, mocker):
-        mock_source_file = mocker.Mock(spec=TGFSFileRef)
-        mock_dest_file = mocker.Mock(spec=TGFSFileRef)
+        mock_source_parent = mocker.Mock(spec=TGFSDirectory)
+        mock_file_to_move = mocker.Mock(spec=TGFSFileRef)
+        mock_source_parent.find_file.return_value = mock_file_to_move
+        mock_dest_parent = mocker.Mock(spec=TGFSDirectory)
 
-        ops._client.file_api.rm = mocker.AsyncMock()
+        ops._client.file_api.move = mocker.AsyncMock(return_value=mock_file_to_move)
 
         mocker.patch.object(
-            ops, "cp_file", return_value=(mock_source_file, mock_dest_file)
+            ops, "cd", side_effect=[mock_source_parent, mock_dest_parent]
         )
         result = await ops.mv_file("/src/file.txt", "/dest/file.txt")
 
-        ops._client.file_api.rm.assert_called_once_with(mock_source_file)
-        assert result == mock_dest_file
+        mock_source_parent.find_file.assert_called_once_with("file.txt")
+        ops._client.file_api.rm.assert_not_called()
+        ops._client.file_api.move.assert_called_once_with(
+            mock_file_to_move, mock_dest_parent, "file.txt"
+        )
+        assert result == mock_file_to_move
 
     @pytest.mark.asyncio
     async def test_rm_dir_recursive(self, ops, mocker):

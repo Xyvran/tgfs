@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 from tgfs.core.mirror import MirrorGroup
 from tgfs.core.model import TGFSDirectory, TGFSFileDesc, TGFSFileRef, TGFSFileVersion
@@ -98,6 +98,55 @@ class FileApi:
         if self._mirror_group and mirror_ids:
             await self._mirror_group.delete(mirror_ids)
 
+    @classmethod
+    def _iter_file_refs(cls, directory: TGFSDirectory) -> Iterator[TGFSFileRef]:
+        yield from directory.find_files()
+        for child in directory.find_dirs():
+            yield from cls._iter_file_refs(child)
+
+    def _descriptors_referenced_elsewhere(
+        self, removing: Iterable[TGFSFileRef]
+    ) -> Set[int]:
+        """Descriptor message ids that survive removing ``removing``.
+
+        ``copy`` deliberately makes the new file ref point at the *same*
+        descriptor message as the original, so the two refs share every
+        Telegram message backing the file. Deleting one of them must
+        therefore leave the channel alone, or the surviving ref would be left
+        pointing at messages that no longer exist -- reported by WebDAV as a
+        0-byte file.
+        """
+        removing_ids = {id(fr) for fr in removing}
+        return {
+            fr.message_id
+            for fr in self._iter_file_refs(self._metadata_api.get_root_directory())
+            if id(fr) not in removing_ids and fr.message_id > 0
+        }
+
+    async def collect_deletable_message_ids(
+        self, frs: Sequence[TGFSFileRef]
+    ) -> Tuple[List[int], MirrorMessageIds]:
+        """Message ids that become garbage once ``frs`` are removed.
+
+        Refs whose descriptor is still referenced by a file outside ``frs``
+        contribute nothing: their messages are shared and must stay.
+        """
+        shared = self._descriptors_referenced_elsewhere(frs)
+        ids: List[int] = []
+        mirror_ids: MirrorMessageIds = {}
+        for fr in frs:
+            if fr.message_id in shared:
+                logger.info(
+                    f"Keeping the telegram messages of {fr.name} "
+                    f"(descriptor {fr.message_id}): another file still refers to them"
+                )
+                continue
+            fr_ids, fr_mirror_ids = await self.collect_all_message_ids(fr)
+            ids.extend(fr_ids)
+            for channel_key, channel_ids in fr_mirror_ids.items():
+                mirror_ids.setdefault(channel_key, []).extend(channel_ids)
+        return ids, mirror_ids
+
     async def copy(
         self, where: TGFSDirectory, fr: TGFSFileRef, name: Optional[str] = None
     ) -> TGFSFileRef:
@@ -105,6 +154,19 @@ class FileApi:
         copied_fr.mirrors = dict(fr.mirrors)
         await self._metadata_api.push()
         return copied_fr
+
+    async def move(
+        self, fr: TGFSFileRef, where: TGFSDirectory, name: Optional[str] = None
+    ) -> TGFSFileRef:
+        """Relocate ``fr`` without re-uploading or deleting anything.
+
+        Implementing a move as copy-then-remove would delete the very
+        messages the copy points at, so the moved file has to be relocated in
+        the metadata instead.
+        """
+        moved_fr = fr.location.relocate_file_ref(fr, where, name)
+        await self._metadata_api.push()
+        return moved_fr
 
     async def _create_new_file(
         self, where: TGFSDirectory, file_msg: FileMessage
@@ -141,7 +203,7 @@ class FileApi:
 
     async def rm(self, fr: TGFSFileRef, version_id: Optional[str] = None) -> None:
         if not version_id:
-            message_ids, mirror_ids = await self.collect_all_message_ids(fr)
+            message_ids, mirror_ids = await self.collect_deletable_message_ids([fr])
             fr.delete()
             await self._metadata_api.push()
             await self._message_api.delete_messages(message_ids)

@@ -4,6 +4,7 @@ from typing import Optional
 
 from asgidav.resource import Resource as _Resource
 from tgfs.app.fs_cache import gfc
+from tgfs.app.utils import strip_webdav_prefix
 from tgfs.core import Client, Ops
 from tgfs.core.model import TGFSFileDesc, TGFSFileRef
 from tgfs.errors import TechnicalError
@@ -69,10 +70,7 @@ class Resource(_Resource):
         await self.__ops.rm_file(self.__relative_path)
 
     def _remove_prefix(self, destination: str) -> str:
-        prefix = f"/webdav/{self.__client.name}"
-        if destination.startswith(prefix):
-            return destination[len(prefix) :]
-        return destination
+        return strip_webdav_prefix(destination, self.__client.name)
 
     async def copy_to(self, destination: str) -> None:
         destination = self._remove_prefix(destination)
