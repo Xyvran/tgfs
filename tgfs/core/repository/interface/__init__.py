@@ -59,7 +59,9 @@ class IFDRepository(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    async def get(self, fr: TGFSFileRef) -> TGFSFileDesc:
+    async def get(
+        self, fr: TGFSFileRef, include_all_versions: bool = False
+    ) -> TGFSFileDesc:
         pass
 
 

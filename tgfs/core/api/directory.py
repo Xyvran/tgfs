@@ -23,13 +23,8 @@ class DirectoryApi:
     def root(self):
         return self.__metadata_api.get_root_directory()
 
-    async def create(
-        self,
-        name: str,
-        under: TGFSDirectory,
-        dir_to_copy: Optional[TGFSDirectory] = None,
-    ) -> TGFSDirectory:
-        new_dir = under.create_dir(name, dir_to_copy)
+    async def create(self, name: str, under: TGFSDirectory) -> TGFSDirectory:
+        new_dir = under.create_dir(name)
         await self.__metadata_api.push()
         return new_dir
 
@@ -48,28 +43,33 @@ class DirectoryApi:
             raise DirectoryIsNotEmpty(directory.absolute_path)
         await self.rm_dangerously(directory)
 
+    async def move(
+        self,
+        directory: TGFSDirectory,
+        to_parent: TGFSDirectory,
+        name: Optional[str] = None,
+    ) -> TGFSDirectory:
+        """Re-parent a directory instead of copying and deleting it.
+
+        The subtree keeps referring to the same Telegram messages, so nothing
+        is uploaded and, crucially, nothing is deleted from the channel.
+        """
+        directory.move_to(to_parent, name)
+        await self.__metadata_api.push()
+        return directory
+
     async def rm_dangerously(self, directory: TGFSDirectory) -> None:
-        message_ids, mirror_ids = await self.__collect_subtree_message_ids(directory)
+        message_ids, mirror_ids = await self.__file_api.collect_deletable_message_ids(
+            self.__subtree_file_refs(directory)
+        )
         directory.delete()
         await self.__metadata_api.push()
         await self.__message_api.delete_messages(message_ids)
         await self.__file_api.delete_mirrored(mirror_ids)
 
-    async def __collect_subtree_message_ids(
-        self, directory: TGFSDirectory
-    ) -> tuple[List[int], dict[str, List[int]]]:
-        ids: List[int] = []
-        mirror_ids: dict[str, List[int]] = {}
-        for fr in directory.find_files():
-            fr_ids, fr_mirror_ids = await self.__file_api.collect_all_message_ids(fr)
-            ids.extend(fr_ids)
-            for channel_key, channel_ids in fr_mirror_ids.items():
-                mirror_ids.setdefault(channel_key, []).extend(channel_ids)
+    @classmethod
+    def __subtree_file_refs(cls, directory: TGFSDirectory) -> List[TGFSFileRef]:
+        frs = list(directory.find_files())
         for child in directory.find_dirs():
-            child_ids, child_mirror_ids = await self.__collect_subtree_message_ids(
-                child
-            )
-            ids.extend(child_ids)
-            for channel_key, channel_ids in child_mirror_ids.items():
-                mirror_ids.setdefault(channel_key, []).extend(channel_ids)
-        return ids, mirror_ids
+            frs.extend(cls.__subtree_file_refs(child))
+        return frs

@@ -82,10 +82,8 @@ class GithubDirectory(TGFSDirectory):
         self.children.append(res)
         return res
 
-    def create_dir(
-        self, name: str, dir_to_copy: Optional[TGFSDirectory] = None
-    ) -> "GithubDirectory":
-        child = super().create_dir(name, dir_to_copy)
+    def create_dir(self, name: str) -> "GithubDirectory":
+        child = super().create_dir(name)
 
         # Create directory in GitHub by creating a placeholder file. The new
         # directory follows the configured key, so its on-repo segment is the
@@ -126,6 +124,78 @@ class GithubDirectory(TGFSDirectory):
             # Remove all files and subdirectories from GitHub
             self._delete_github_directory()
         super().delete()
+
+    def move_to(
+        self, new_parent: TGFSDirectory, new_name: Optional[str] = None
+    ) -> None:
+        old_parent, old_name = self.parent, self.name
+        old_prefix = self._github_path
+        super().move_to(new_parent, new_name)
+        new_prefix = self._github_path
+        if not old_prefix or not new_prefix or old_prefix == new_prefix:
+            return
+        try:
+            self._move_github_directory(old_prefix, new_prefix)
+        except Exception:
+            # The repo *is* the metadata here, so an in-memory tree that the
+            # repo does not back would only survive until the next reload.
+            # Put the directory back where it was instead.
+            if old_parent is not None and self.parent is not None:
+                self.parent.children.remove(self)
+                self.name = old_name
+                self.parent = old_parent
+                old_parent.children.append(self)
+            raise
+
+    def _move_github_directory(self, old_prefix: str, new_prefix: str) -> None:
+        """Re-path this directory's subtree in a single commit.
+
+        The Contents API has no rename, and deleting plus re-creating every
+        blob would lose the git history the timestamps are restored from, so
+        rewrite the tree with the affected blobs moved to their new paths --
+        the same Git Data API round-trip ``_delete_github_directory`` uses.
+        """
+        try:
+            ref = self._ghc.repo.get_git_ref(f"heads/{self._ghc.commit}")
+            base_commit = self._ghc.repo.get_git_commit(ref.object.sha)
+            tree = self._ghc.repo.get_git_tree(base_commit.tree.sha, recursive=True)
+
+            elements: list[InputGitTreeElement] = []
+            moved = 0
+            for entry in tree.tree:
+                if entry.type != "blob":
+                    continue
+                path = entry.path
+                if path == old_prefix or path.startswith(old_prefix + "/"):
+                    path = new_prefix + path[len(old_prefix) :]
+                    moved += 1
+                elements.append(
+                    InputGitTreeElement(
+                        path=path,
+                        mode=entry.mode,
+                        type="blob",
+                        sha=entry.sha,
+                    )
+                )
+
+            if moved == 0:
+                return
+
+            new_tree = self._ghc.repo.create_git_tree(elements)
+            new_commit = self._ghc.repo.create_git_commit(
+                f"Move directory {old_prefix} to {new_prefix}", new_tree, [base_commit]
+            )
+            ref.edit(new_commit.sha)
+            logger.info(
+                f"Moved {moved} object(s) from {old_prefix} to {new_prefix} "
+                f"in {self._ghc.repo_name}"
+            )
+        except Exception as ex:
+            logger.error(
+                f"Failed to move directory {old_prefix} to {new_prefix} "
+                f"in {self._ghc.repo_name}: {ex}"
+            )
+            raise
 
     def create_file_ref(self, name: str, file_message_id: int) -> TGFSFileRef:
         file_ref = super().create_file_ref(name, file_message_id)

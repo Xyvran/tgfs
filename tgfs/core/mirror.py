@@ -30,7 +30,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from tgfs.errors import MessageNotFound, TechnicalError
-from tgfs.reqres import FileMessageFromStream
 
 if TYPE_CHECKING:
     # Type-only import: tgfs.core.api imports modules that import this
@@ -126,27 +125,10 @@ class MirrorGroup:
         """Bandwidth-bound fallback: stream a part down and up again.
 
         Used when forwarding is impossible (``noforwards`` channels).
-        The mirror document keeps the content byte-for-byte but not the
-        original document name; names live in the TGFS metadata, so
-        nothing user-visible depends on it.
         """
-        # Imported here to avoid a circular import at module load time.
-        from tgfs.core.repository.impl.file_content.file_uploader import (
-            FileUploader,
+        return await self._primary.reupload_to(
+            message_id, ch.message_api.private_file_channel
         )
-
-        message = (await self._primary.get_messages([message_id]))[0]
-        if not message or not message.document:
-            raise MessageNotFound(message_id=message_id)
-        size = message.document.size
-        resp = await self._primary.download_file(message_id, 0, size - 1)
-        file_msg = FileMessageFromStream.new(
-            stream=resp.chunks, size=size, name=f"part-{message_id}"
-        )
-        uploader = FileUploader(self._primary.tdlib.next_bot, file_msg)
-        await uploader.upload()
-        sent = await uploader.send(ch.message_api.private_file_channel)
-        return sent.message_id
 
     # -- file descriptors --------------------------------------------------
 
@@ -231,12 +213,15 @@ class MirrorGroup:
 
     # -- deletion ----------------------------------------------------------
 
-    async def delete(self, per_channel: Dict[str, List[int]]) -> None:
+    async def delete(
+        self, per_channel: Dict[str, List[int]], force: bool = False
+    ) -> None:
         """Best-effort deletion of mirrored messages, per channel.
 
         Honors ``telegram.delete_messages_on_remove`` exactly like the
         primary-channel deletion does (the gate lives inside
-        ``MessageApi.delete_messages``).
+        ``MessageApi.delete_messages``); ``force`` bypasses that gate for
+        internal bookkeeping, matching ``MessageApi.delete_messages``.
         """
         for key, ids in per_channel.items():
             if not ids:
@@ -247,7 +232,7 @@ class MirrorGroup:
                     f"channel is not configured as a mirror anymore"
                 )
                 continue
-            await api.delete_messages(ids)
+            await api.delete_messages(ids, force=force)
 
     # -- internals ---------------------------------------------------------
 

@@ -170,7 +170,10 @@ class TGFSFileDesc:
         self.versions[version.id] = version
         if (
             self.latest_version_id == INVALID_VERSION_ID
-            or version.updated_at > self.versions[self.latest_version_id].updated_at
+            # ``>=`` and not ``>``: two versions can carry the same timestamp
+            # (they are only millisecond-precise once serialized), and of two
+            # equally-stamped versions the one added later is the newer one.
+            or version.updated_at >= self.versions[self.latest_version_id].updated_at
         ):
             self.latest_version_id = version.id
         if not self.created_at or version.updated_at < self.created_at:
@@ -194,11 +197,18 @@ class TGFSFileDesc:
         if not sort:
             res: Iterable[TGFSFileVersion] = self.versions.values()
         else:
-            res = sorted(
-                self.versions.values(),
-                key=lambda v: v.updated_at_timestamp,
-                reverse=True,
-            )
+            # Newest first. Timestamps are millisecond-precise, so two
+            # versions can tie; insertion order decides then, because
+            # ``from_dict`` reads the first entry as the latest version and
+            # would otherwise resurrect the older one of the two.
+            res = [
+                version
+                for _, version in sorted(
+                    enumerate(self.versions.values()),
+                    key=lambda item: (item[1].updated_at_timestamp, item[0]),
+                    reverse=True,
+                )
+            ]
 
         if exclude_invalid:
             res = [v for v in res if v.is_valid()]
@@ -210,8 +220,10 @@ class TGFSFileDesc:
         del self.versions[version_id]
         if version_id == self.latest_version_id:
             if self.versions:
+                # Ties go to the version added last, as in ``add_version``.
                 self.latest_version_id = max(
-                    self.versions, key=lambda k: self.versions[k].updated_at
-                )
+                    enumerate(self.versions),
+                    key=lambda item: (self.versions[item[1]].updated_at, item[0]),
+                )[1]
             else:
                 self.latest_version_id = ""

@@ -8,6 +8,8 @@ from tgfs.errors import (
     FileOrDirectoryAlreadyExists,
     FileOrDirectoryDoesNotExist,
     InvalidName,
+    InvalidPath,
+    TechnicalError,
 )
 from tgfs.utils.time import FIRST_DAY_OF_EPOCH, ts
 
@@ -274,7 +276,7 @@ class TestTGFSDirectory:
         # Test creating a new directory
         parent = TGFSDirectory(name="parent", parent=None)
 
-        child = parent.create_dir("new_dir", None)
+        child = parent.create_dir("new_dir")
 
         assert child.name == "new_dir"
         assert child.parent == parent
@@ -282,24 +284,28 @@ class TestTGFSDirectory:
         assert child.children == []
         assert child.files == []
 
-    def test_create_dir_with_copy(self):
-        # Test creating directory by copying another
+    def test_create_dir_always_starts_empty(self):
+        # A new directory always starts empty: seeding it from another one
+        # used to hand over that directory's own children/files lists, so the
+        # "copy" and the original were the same thing. Copying a directory is
+        # a recursive operation and lives in Ops.cp_dir.
         template = TGFSDirectory(name="template", parent=None)
-        template_child = TGFSDirectory(name="template_child", parent=template)
-        template_file = TGFSFileRef(
-            message_id=123, name="template.txt", location=template
+        template.children.append(TGFSDirectory(name="template_child", parent=template))
+        template.files.append(
+            TGFSFileRef(message_id=123, name="template.txt", location=template)
         )
-        template.children.append(template_child)
-        template.files.append(template_file)
 
         parent = TGFSDirectory(name="parent", parent=None)
 
-        copy_dir = parent.create_dir("copy", template)
+        new_dir = parent.create_dir("template")
 
-        assert copy_dir.name == "copy"
-        assert copy_dir.parent == parent
-        assert copy_dir.children == template.children
-        assert copy_dir.files == template.files
+        assert new_dir.name == "template"
+        assert new_dir.parent == parent
+        assert new_dir.children == []
+        assert new_dir.files == []
+        # Mutating the new directory leaves the like-named one alone.
+        new_dir.create_file_ref("fresh.txt", 7)
+        assert [f.name for f in template.files] == ["template.txt"]
 
     def test_create_dir_already_exists(self):
         # Test creating directory that already exists
@@ -308,7 +314,7 @@ class TestTGFSDirectory:
         parent.children.append(existing)
 
         with pytest.raises(FileOrDirectoryAlreadyExists):
-            parent.create_dir("existing", None)
+            parent.create_dir("existing")
 
     def test_root_dir_factory(self):
         # Test creating root directory
@@ -505,7 +511,7 @@ class TestTGFSDirectory:
 
     def test_child_delete_bumps_parent_modified_at(self):
         parent = TGFSDirectory(name="parent", parent=None)
-        child = parent.create_dir("child", None)
+        child = parent.create_dir("child")
         parent.modified_at = datetime.datetime(2020, 1, 1)
         stale = parent.modified_at_timestamp
 
@@ -513,17 +519,18 @@ class TestTGFSDirectory:
 
         assert parent.modified_at_timestamp > stale
 
-    def test_create_dir_stamps_fresh_timestamp_on_copy(self):
-        template = TGFSDirectory(name="template", parent=None)
-        template.created_at = datetime.datetime(2000, 1, 1)
-        template.modified_at = datetime.datetime(2000, 1, 1)
-        template_ts = template.created_at_timestamp
-
+    def test_create_dir_stamps_fresh_timestamps(self):
         parent = TGFSDirectory(name="parent", parent=None)
-        copy_dir = parent.create_dir("copy", template)
+        parent.created_at = datetime.datetime(2000, 1, 1)
+        parent.modified_at = datetime.datetime(2000, 1, 1)
+        old_ts = parent.created_at_timestamp
 
-        assert copy_dir.created_at_timestamp > template_ts
-        assert copy_dir.modified_at_timestamp > template_ts
+        child = parent.create_dir("child")
+
+        assert child.created_at_timestamp > old_ts
+        assert child.modified_at_timestamp > old_ts
+        # Creating a child counts as modifying the parent.
+        assert parent.modified_at_timestamp > old_ts
 
     def test_absolute_path_root(self):
         # Test absolute path for root directory
@@ -570,3 +577,118 @@ class TestTGFSDirectory:
         assert projects.absolute_path == "/Documents/Projects"
         assert myproject.absolute_path == "/Documents/Projects/MyProject"
         assert src.absolute_path == "/Documents/Projects/MyProject/src"
+
+
+class TestDirectoryRelocation:
+    def test_relocate_file_ref_keeps_the_descriptor(self):
+        root = TGFSDirectory.root_dir()
+        src = root.create_dir("src")
+        dest = root.create_dir("dest")
+        fr = src.create_file_ref("a.txt", 42)
+        fr.mirrors = {"-100": 7}
+
+        moved = src.relocate_file_ref(fr, dest)
+
+        assert dest.find_file("a.txt") is moved
+        assert src.find_files() == []
+        assert moved.message_id == 42
+        assert moved.mirrors == {"-100": 7}
+        assert moved.location is dest
+
+    def test_relocate_file_ref_can_rename(self):
+        root = TGFSDirectory.root_dir()
+        src = root.create_dir("src")
+        dest = root.create_dir("dest")
+        fr = src.create_file_ref("a.txt", 42)
+
+        moved = src.relocate_file_ref(fr, dest, "b.txt")
+
+        assert moved.name == "b.txt"
+        assert dest.find_file("b.txt") is moved
+
+    def test_relocate_file_ref_to_the_same_place_is_a_noop(self):
+        root = TGFSDirectory.root_dir()
+        src = root.create_dir("src")
+        fr = src.create_file_ref("a.txt", 42)
+
+        assert src.relocate_file_ref(fr, src) is fr
+        assert src.find_files() == [fr]
+
+    def test_relocate_file_ref_keeps_the_source_on_failure(self, monkeypatch):
+        root = TGFSDirectory.root_dir()
+        src = root.create_dir("src")
+        dest = root.create_dir("dest")
+        fr = src.create_file_ref("a.txt", 42)
+
+        def boom(_fr):
+            raise RuntimeError("backend is down")
+
+        monkeypatch.setattr(src, "delete_file_ref", boom)
+
+        with pytest.raises(RuntimeError):
+            src.relocate_file_ref(fr, dest)
+
+        assert src.find_file("a.txt") is fr
+        assert dest.find_files() == []
+
+    def test_move_to_reparents_the_subtree(self):
+        root = TGFSDirectory.root_dir()
+        src = root.create_dir("src")
+        dest = root.create_dir("dest")
+        moving = src.create_dir("moving")
+        moving.create_file_ref("a.txt", 42)
+
+        moving.move_to(dest)
+
+        assert moving.parent is dest
+        assert dest.find_dir("moving") is moving
+        assert src.find_dirs() == []
+        assert moving.absolute_path == "/dest/moving"
+        assert moving.find_file("a.txt").message_id == 42
+
+    def test_move_to_can_rename(self):
+        root = TGFSDirectory.root_dir()
+        src = root.create_dir("src")
+        dest = root.create_dir("dest")
+
+        src.move_to(dest, "renamed")
+
+        assert src.name == "renamed"
+        assert dest.find_dir("renamed") is src
+
+    def test_move_to_the_same_place_is_a_noop(self):
+        root = TGFSDirectory.root_dir()
+        d = root.create_dir("d")
+
+        d.move_to(root)
+
+        assert root.find_dir("d") is d
+
+    def test_move_to_rejects_the_root(self):
+        root = TGFSDirectory.root_dir()
+        dest = root.create_dir("dest")
+
+        with pytest.raises(TechnicalError):
+            root.move_to(dest)
+
+    def test_move_to_rejects_a_descendant(self):
+        root = TGFSDirectory.root_dir()
+        outer = root.create_dir("outer")
+        inner = outer.create_dir("inner")
+
+        with pytest.raises(InvalidPath):
+            outer.move_to(inner)
+
+        assert outer.parent is root
+
+    def test_move_to_rejects_an_occupied_name(self):
+        root = TGFSDirectory.root_dir()
+        src = root.create_dir("src")
+        dest = root.create_dir("dest")
+        moving = src.create_dir("moving")
+        dest.create_dir("moving")
+
+        with pytest.raises(FileOrDirectoryAlreadyExists):
+            moving.move_to(dest)
+
+        assert moving.parent is src

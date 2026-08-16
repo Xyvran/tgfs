@@ -17,6 +17,7 @@ from tgfs.reqres import (
     DownloadFileReq,
     DownloadFileResp,
     EditMessageTextReq,
+    FileMessageFromStream,
     ForwardMessagesReq,
     GetPinnedMessageReq,
     MessageResp,
@@ -113,6 +114,57 @@ class MessageApi(MessageBroker):
             )
         )
         return [m.message_id for m in resp]
+
+    async def reupload_to(self, message_id: int, to_channel: int) -> int:
+        """Bandwidth-bound copy: stream a document down and up again.
+
+        The fallback for channels where forwarding is impossible
+        ("restrict saving content"). Bytes are copied verbatim -- this
+        sits below the encryption decorator, so ciphertext stays
+        ciphertext and is never encrypted twice. The document name is
+        not preserved; names live in the TGFS metadata, so nothing
+        user-visible depends on it.
+        """
+        # Imported here to avoid a circular import at module load time.
+        from tgfs.core.repository.impl.file_content.file_uploader import FileUploader
+
+        message = (await self.get_messages([message_id]))[0]
+        if not message or not message.document:
+            raise MessageNotFound(message_id=message_id)
+        size = message.document.size
+        resp = await self.download_file(message_id, 0, size - 1)
+        file_msg = FileMessageFromStream.new(
+            stream=resp.chunks, size=size, name=f"part-{message_id}"
+        )
+        uploader = FileUploader(self.tdlib.next_bot, file_msg)
+        await uploader.upload()
+        sent = await uploader.send(to_channel)
+        return sent.message_id
+
+    async def duplicate_messages(self, message_ids: List[int]) -> List[int]:
+        """Copy messages within this channel, without moving their bytes.
+
+        Forwarding is a server-side operation: the new messages point at
+        the documents that are already on Telegram, so a copy costs one
+        API call no matter how large the file is. Channels with
+        "restrict saving content" reject forwarding, so fall back to
+        streaming each part down and up again.
+        """
+        if not message_ids:
+            return []
+        try:
+            return await self.forward_messages_from(
+                self.private_file_channel, message_ids
+            )
+        except Exception as ex:
+            logger.warning(
+                f"Could not forward {len(message_ids)} message(s) inside channel "
+                f"{self.private_file_channel} ({ex}); falling back to re-upload"
+            )
+            return [
+                await self.reupload_to(message_id, self.private_file_channel)
+                for message_id in message_ids
+            ]
 
     async def delete_messages(
         self, message_ids: Iterable[int], force: bool = False

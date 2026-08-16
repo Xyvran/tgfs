@@ -2,7 +2,12 @@ import datetime
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Self
 
-from tgfs.errors import FileOrDirectoryAlreadyExists, FileOrDirectoryDoesNotExist
+from tgfs.errors import (
+    FileOrDirectoryAlreadyExists,
+    FileOrDirectoryDoesNotExist,
+    InvalidPath,
+    TechnicalError,
+)
 from tgfs.utils.time import FIRST_DAY_OF_EPOCH, ts
 
 from .common import validate_name
@@ -102,18 +107,19 @@ class TGFSDirectory:
         d.children = [TGFSDirectory.from_dict(child, d) for child in data["children"]]
         return d
 
-    def create_dir(
-        self, name: str, dir_to_copy: Optional["TGFSDirectory"]
-    ) -> "TGFSDirectory":
+    def create_dir(self, name: str) -> "TGFSDirectory":
+        """Create an empty child directory.
+
+        Deliberately does not take a directory to copy: seeding the child
+        with another directory's ``children``/``files`` shares the very list
+        objects and leaves every file ref pointing back at its old location,
+        so the "copy" and the original were one and the same. Copying a
+        directory is a recursive operation and lives in ``Ops.cp_dir``.
+        """
         if len(self.find_dirs([name])) > 0:
             raise FileOrDirectoryAlreadyExists(name)
 
-        child = TGFSDirectory(
-            name=name,
-            parent=self,
-            children=[] if not dir_to_copy else dir_to_copy.children,
-            files=[] if not dir_to_copy else dir_to_copy.files,
-        )
+        child = TGFSDirectory(name=name, parent=self, children=[], files=[])
 
         self.children.append(child)
         self._touch_modified()
@@ -161,6 +167,70 @@ class TGFSDirectory:
     def delete_file_ref(self, fr: TGFSFileRef) -> None:
         self.files.remove(fr)
         self._touch_modified()
+
+    def relocate_file_ref(
+        self, fr: TGFSFileRef, to: "TGFSDirectory", new_name: Optional[str] = None
+    ) -> TGFSFileRef:
+        """Move ``fr`` to ``to``, keeping the Telegram messages behind it.
+
+        A move must never touch the channel: the descriptor message and every
+        content message stay exactly where they are, only the reference to
+        them changes place. The new ref is created before the old one is
+        dropped so a failing backend leaves the file reachable.
+        """
+        name = new_name or fr.name
+        if to is self and name == fr.name:
+            return fr
+
+        moved = to.create_file_ref(name, fr.message_id)
+        moved.mirrors = dict(fr.mirrors)
+        try:
+            self.delete_file_ref(fr)
+        except Exception:
+            to.delete_file_ref(moved)
+            raise
+        return moved
+
+    def is_ancestor_of(self, other: "TGFSDirectory") -> bool:
+        """True when ``other`` is ``self`` or lives somewhere below it."""
+        node: Optional["TGFSDirectory"] = other
+        while node is not None:
+            if node is self:
+                return True
+            node = node.parent
+        return False
+
+    def move_to(
+        self, new_parent: "TGFSDirectory", new_name: Optional[str] = None
+    ) -> None:
+        """Re-parent this directory (and everything below it) in place.
+
+        Like :meth:`relocate_file_ref` this is a pure metadata operation --
+        the subtree keeps pointing at the very same Telegram messages.
+        """
+        if self.parent is None:
+            raise TechnicalError("The root directory cannot be moved")
+
+        name = new_name or self.name
+        validate_name(name)
+
+        if new_parent is self.parent and name == self.name:
+            return
+
+        if self.is_ancestor_of(new_parent):
+            raise InvalidPath(f"{self.absolute_path} cannot be moved into itself")
+
+        if new_parent.find_dirs([name]):
+            raise FileOrDirectoryAlreadyExists(name)
+
+        old_parent = self.parent
+        old_parent.children.remove(self)
+        old_parent._touch_modified()
+
+        self.name = name
+        self.parent = new_parent
+        new_parent.children.append(self)
+        new_parent._touch_modified()
 
     def delete(self) -> None:
         if self.parent:

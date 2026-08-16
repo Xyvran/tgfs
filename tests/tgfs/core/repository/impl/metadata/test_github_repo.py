@@ -720,6 +720,78 @@ class TestGithubDirectory:
         # Directory should still be removed from parent
         assert directory not in parent.children
 
+    def test_move_directory(self, mock_ghc):
+        """Moving a directory re-paths its whole subtree in one commit."""
+
+        def blob(path):
+            e = Mock()
+            e.path, e.type, e.sha, e.mode = path, "blob", path + "-sha", "100644"
+            return e
+
+        subtree = Mock()
+        subtree.path, subtree.type = "src/moving/sub", "tree"
+
+        entries = [
+            blob("src/moving/.gitkeep"),
+            blob("src/moving/sub/.gitkeep"),  # nested -> must move along
+            blob("src/moving/sub/note.txt.7"),
+            subtree,  # a tree entry -> ignored
+            blob("other/.gitkeep"),  # unrelated -> must keep its path
+        ]
+
+        ref = Mock()
+        ref.object.sha = "commitsha"
+        base_commit = Mock()
+        base_commit.tree.sha = "basetreesha"
+        tree = Mock()
+        tree.tree = entries
+        new_commit = Mock()
+        new_commit.sha = "newcommitsha"
+
+        mock_ghc.repo.get_git_ref.return_value = ref
+        mock_ghc.repo.get_git_commit.return_value = base_commit
+        mock_ghc.repo.get_git_tree.return_value = tree
+        mock_ghc.repo.create_git_tree.return_value = Mock()
+        mock_ghc.repo.create_git_commit.return_value = new_commit
+
+        root = GithubDirectory(mock_ghc, "root", None)
+        src = GithubDirectory(mock_ghc, "src", root)
+        dest = GithubDirectory(mock_ghc, "dest", root)
+        root.children.extend([src, dest])
+        moving = GithubDirectory(mock_ghc, "moving", src)
+        src.children.append(moving)
+
+        moving.move_to(dest)
+
+        elements = mock_ghc.repo.create_git_tree.call_args[0][0]
+        assert sorted(e._identity["path"] for e in elements) == [
+            "dest/moving/.gitkeep",
+            "dest/moving/sub/.gitkeep",
+            "dest/moving/sub/note.txt.7",
+            "other/.gitkeep",
+        ]
+        ref.edit.assert_called_once_with("newcommitsha")
+        assert dest.children == [moving]
+        assert src.children == []
+
+    def test_move_directory_rolls_back_when_the_repo_write_fails(self, mock_ghc):
+        mock_ghc.repo.get_git_ref.side_effect = Exception("Access denied")
+
+        root = GithubDirectory(mock_ghc, "root", None)
+        src = GithubDirectory(mock_ghc, "src", root)
+        dest = GithubDirectory(mock_ghc, "dest", root)
+        root.children.extend([src, dest])
+        moving = GithubDirectory(mock_ghc, "moving", src)
+        src.children.append(moving)
+
+        with pytest.raises(Exception, match="Access denied"):
+            moving.move_to(dest)
+
+        # The repo is the metadata, so a move it did not record must not stick.
+        assert moving.parent is src
+        assert src.children == [moving]
+        assert dest.children == []
+
 
 class TestGithubConfig:
     """Test the GithubConfig dataclass"""
@@ -760,7 +832,7 @@ class TestIntegrationScenarios:
 
         # Create a subdirectory
         mock_repo.create_file.return_value = Mock()
-        sub_dir = root_dir.create_dir("documents", None)
+        sub_dir = root_dir.create_dir("documents")
 
         # Create file references
         file_ref1 = sub_dir.create_file_ref("report", 11111)
