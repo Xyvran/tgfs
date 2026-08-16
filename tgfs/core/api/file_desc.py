@@ -23,8 +23,18 @@ class FileDescApi:
     async def create_file_desc(self, file_msg: FileMessage) -> FDRepositoryResp:
         return await self.append_file_version(file_msg, fr=None)
 
-    async def get_file_desc(self, fr: TGFSFileRef) -> TGFSFileDesc:
-        return await self.__fd_repo.get(fr)
+    async def get_file_desc(
+        self, fr: TGFSFileRef, include_all_versions: bool = False
+    ) -> TGFSFileDesc:
+        return await self.__fd_repo.get(fr, include_all_versions)
+
+    async def save_new_file_desc(self, fd: TGFSFileDesc) -> FDRepositoryResp:
+        """Write ``fd`` to a brand new descriptor message.
+
+        Unlike :meth:`create_file_desc` this uploads nothing -- the
+        descriptor already knows which content messages it refers to.
+        """
+        return await self.__fd_repo.save(fd, fr=None)
 
     async def download_file_at_version(
         self, fv: TGFSFileVersion, begin: int, end: int, as_name: str

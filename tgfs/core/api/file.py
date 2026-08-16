@@ -1,5 +1,6 @@
 import logging
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
+from uuid import uuid4 as uuid
 
 from tgfs.core.mirror import MirrorGroup
 from tgfs.core.model import TGFSDirectory, TGFSFileDesc, TGFSFileRef, TGFSFileVersion
@@ -94,9 +95,11 @@ class FileApi:
         }
         return [mid for mid in version.message_ids if mid > 0], mirror_ids
 
-    async def delete_mirrored(self, mirror_ids: MirrorMessageIds) -> None:
+    async def delete_mirrored(
+        self, mirror_ids: MirrorMessageIds, force: bool = False
+    ) -> None:
         if self._mirror_group and mirror_ids:
-            await self._mirror_group.delete(mirror_ids)
+            await self._mirror_group.delete(mirror_ids, force=force)
 
     @classmethod
     def _iter_file_refs(cls, directory: TGFSDirectory) -> Iterator[TGFSFileRef]:
@@ -109,12 +112,12 @@ class FileApi:
     ) -> Set[int]:
         """Descriptor message ids that survive removing ``removing``.
 
-        ``copy`` deliberately makes the new file ref point at the *same*
-        descriptor message as the original, so the two refs share every
-        Telegram message backing the file. Deleting one of them must
-        therefore leave the channel alone, or the surviving ref would be left
+        Copies used to be made by pointing a second file ref at the *same*
+        descriptor message, so both files were backed by one set of Telegram
+        messages. Removing either of them would then leave the other one
         pointing at messages that no longer exist -- reported by WebDAV as a
-        0-byte file.
+        0-byte file. New copies own their content, but metadata written
+        before that still holds such pairs, so removals keep checking.
         """
         removing_ids = {id(fr) for fr in removing}
         return {
@@ -147,13 +150,96 @@ class FileApi:
                 mirror_ids.setdefault(channel_key, []).extend(channel_ids)
         return ids, mirror_ids
 
+    async def _duplicate_versions(self, fd: TGFSFileDesc) -> TGFSFileDesc:
+        """Build a descriptor whose versions own fresh content messages.
+
+        Every part of every version is duplicated inside the channel in one
+        server-side call, so the copy costs the same whether the file is a
+        kilobyte or a hundred gigabytes. Timestamps and part sizes carry
+        over, so the copy keeps the full history; the versions get fresh ids
+        because two files that are meant to be independent should not share
+        an identifier with each other.
+        """
+        versions = fd.get_versions(sort=True)
+        parts = [mid for version in versions for mid in version.message_ids]
+        new_parts = await self._message_api.duplicate_messages(parts)
+
+        mirrors: Dict[str, List[int]] = {}
+        if self._mirror_group and new_parts:
+            mirrors = await self._mirror_group.mirror_parts(new_parts)
+
+        copied = TGFSFileDesc(name=fd.name)
+        version_ids: Dict[str, str] = {}
+        offset = 0
+        for version in versions:
+            n = len(version.message_ids)
+            version_ids[version.id] = str(uuid())
+            copied.add_version(
+                TGFSFileVersion(
+                    id=version_ids[version.id],
+                    updated_at=version.updated_at,
+                    message_ids=new_parts[offset : offset + n],
+                    part_sizes=list(version.part_sizes),
+                    mirrors={
+                        channel_key: ids[offset : offset + n]
+                        for channel_key, ids in mirrors.items()
+                    },
+                )
+            )
+            offset += n
+        # add_version derives created_at from the versions it is given; the
+        # copy should carry the original's creation date instead.
+        copied.created_at = fd.created_at
+        if latest := version_ids.get(fd.latest_version_id):
+            copied.latest_version_id = latest
+        return copied
+
     async def copy(
         self, where: TGFSDirectory, fr: TGFSFileRef, name: Optional[str] = None
     ) -> TGFSFileRef:
-        copied_fr = where.create_file_ref(name or fr.name, fr.message_id)
-        copied_fr.mirrors = dict(fr.mirrors)
+        """Copy a file without moving a single byte of its content.
+
+        The copy gets its own descriptor and its own content messages, so
+        writing to it -- or deleting it -- leaves the original alone.
+        """
+        fd = await self._file_desc_api.get_file_desc(fr, include_all_versions=True)
+        copied_fd = await self._duplicate_versions(fd)
+        resp: Optional[FDRepositoryResp] = None
+        try:
+            resp = await self._file_desc_api.save_new_file_desc(copied_fd)
+            copied_fr = where.create_file_ref(name or fr.name, resp.message_id)
+        except Exception:
+            await self._discard_orphans(copied_fd, resp)
+            raise
+        copied_fr.mirrors = dict(resp.mirrors)
         await self._metadata_api.push()
         return copied_fr
+
+    async def _discard_orphans(
+        self, fd: TGFSFileDesc, resp: Optional[FDRepositoryResp] = None
+    ) -> None:
+        """Drop the messages of a copy that never made it into the metadata.
+
+        Nothing refers to them, and they were created moments ago by this
+        very call, so they are cleaned up regardless of the user's setting
+        for keeping removed file messages.
+        """
+        message_ids: List[int] = []
+        mirror_ids: MirrorMessageIds = {}
+        if resp is not None:
+            message_ids.append(resp.message_id)
+            _merge_mirror_ids(mirror_ids, resp.mirrors)
+        for version in fd.get_versions():
+            message_ids.extend(mid for mid in version.message_ids if mid > 0)
+            for channel_key, ids in version.mirrors.items():
+                mirror_ids.setdefault(channel_key, []).extend(
+                    mid for mid in ids if mid > 0
+                )
+        try:
+            await self._message_api.delete_messages(message_ids, force=True)
+            await self.delete_mirrored(mirror_ids, force=True)
+        except Exception as ex:
+            logger.warning(f"Could not clean up after a failed copy: {ex}")
 
     async def move(
         self, fr: TGFSFileRef, where: TGFSDirectory, name: Optional[str] = None
@@ -229,8 +315,10 @@ class FileApi:
         except FileOrDirectoryDoesNotExist:
             return await self._create_new_file(under, file_msg)
 
-    async def desc(self, fr: TGFSFileRef) -> TGFSFileDesc:
-        return await self._file_desc_api.get_file_desc(fr)
+    async def desc(
+        self, fr: TGFSFileRef, include_all_versions: bool = False
+    ) -> TGFSFileDesc:
+        return await self._file_desc_api.get_file_desc(fr, include_all_versions)
 
     async def retrieve(
         self,

@@ -107,18 +107,19 @@ class TGFSDirectory:
         d.children = [TGFSDirectory.from_dict(child, d) for child in data["children"]]
         return d
 
-    def create_dir(
-        self, name: str, dir_to_copy: Optional["TGFSDirectory"]
-    ) -> "TGFSDirectory":
+    def create_dir(self, name: str) -> "TGFSDirectory":
+        """Create an empty child directory.
+
+        Deliberately does not take a directory to copy: seeding the child
+        with another directory's ``children``/``files`` shares the very list
+        objects and leaves every file ref pointing back at its old location,
+        so the "copy" and the original were one and the same. Copying a
+        directory is a recursive operation and lives in ``Ops.cp_dir``.
+        """
         if len(self.find_dirs([name])) > 0:
             raise FileOrDirectoryAlreadyExists(name)
 
-        child = TGFSDirectory(
-            name=name,
-            parent=self,
-            children=[] if not dir_to_copy else dir_to_copy.children,
-            files=[] if not dir_to_copy else dir_to_copy.files,
-        )
+        child = TGFSDirectory(name=name, parent=self, children=[], files=[])
 
         self.children.append(child)
         self._touch_modified()

@@ -82,10 +82,8 @@ class GithubDirectory(TGFSDirectory):
         self.children.append(res)
         return res
 
-    def create_dir(
-        self, name: str, dir_to_copy: Optional[TGFSDirectory] = None
-    ) -> "GithubDirectory":
-        child = super().create_dir(name, dir_to_copy)
+    def create_dir(self, name: str) -> "GithubDirectory":
+        child = super().create_dir(name)
 
         # Create directory in GitHub by creating a placeholder file. The new
         # directory follows the configured key, so its on-repo segment is the

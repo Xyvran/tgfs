@@ -156,33 +156,61 @@ class TestOps:
             await ops.desc("/directory")
 
     @pytest.mark.asyncio
-    async def test_cp_dir(self, ops, mock_root_directory, mocker):
-        mock_source_dir = mocker.Mock(spec=TGFSDirectory)
-        mock_dest_dir = mocker.Mock(spec=TGFSDirectory)
-        mock_copied_dir = mocker.Mock(spec=TGFSDirectory)
+    async def test_cp_dir(self, ops, mocker):
+        # A directory copy is recursive: the destination is created and every
+        # file below the source is copied into it, one file ref at a time.
+        source = TGFSDirectory(name="src_dir", parent=None)
+        top = source.create_file_ref("top.txt", 1)
+        inner_dir = source.create_dir("sub")
+        inner = inner_dir.create_file_ref("inner.txt", 2)
 
-        # Setup source directory finding
         mock_source_parent = mocker.Mock(spec=TGFSDirectory)
-        mock_root_directory.find_dir.side_effect = lambda name: {
-            "source_parent": mock_source_parent,
-            "dest_parent": mock_dest_dir,
-        }.get(name, mocker.Mock())
+        mock_source_parent.find_dir.return_value = source
+        mock_dest_parent = mocker.Mock(spec=TGFSDirectory)
+        mock_dest_parent.parent = None
 
-        mock_source_parent.find_dir.return_value = mock_source_dir
+        created: list[tuple[str, object]] = []
 
-        ops._client.dir_api.create = mocker.AsyncMock(return_value=mock_copied_dir)
+        async def fake_create(name, under):
+            created.append((name, under))
+            return TGFSDirectory(name=name, parent=None)
 
-        # Mock cd to return appropriate directories
-        mock_cd = mocker.Mock(side_effect=[mock_source_parent, mock_dest_dir])
-        mocker.patch.object(ops, "cd", mock_cd)
+        ops._client.dir_api.create = mocker.AsyncMock(side_effect=fake_create)
+        ops._client.file_api.copy = mocker.AsyncMock()
+        ops._client.metadata_api = None
+
+        mocker.patch.object(
+            ops, "cd", mocker.Mock(side_effect=[mock_source_parent, mock_dest_parent])
+        )
 
         result = await ops.cp_dir("/source_parent/src_dir", "/dest_parent/dest_dir")
 
         mock_source_parent.find_dir.assert_called_once_with("src_dir")
-        ops._client.dir_api.create.assert_called_once_with(
-            "dest_dir", mock_dest_dir, mock_source_dir
+        assert [name for name, _ in created] == ["dest_dir", "sub"]
+        assert created[0][1] is mock_dest_parent
+        assert [call.args[1] for call in ops._client.file_api.copy.call_args_list] == [
+            top,
+            inner,
+        ]
+        assert result.name == "dest_dir"
+
+    @pytest.mark.asyncio
+    async def test_cp_dir_rejects_copying_into_itself(self, ops, mocker):
+        source = TGFSDirectory(name="src_dir", parent=None)
+        target = source.create_dir("sub")
+
+        mock_source_parent = mocker.Mock(spec=TGFSDirectory)
+        mock_source_parent.find_dir.return_value = source
+        ops._client.dir_api.create = mocker.AsyncMock()
+
+        mocker.patch.object(
+            ops, "cd", mocker.Mock(side_effect=[mock_source_parent, target])
         )
-        assert result == (mock_source_dir, mock_copied_dir)
+
+        with pytest.raises(InvalidPath):
+            await ops.cp_dir("/parent/src_dir", "/parent/src_dir/sub/copy")
+
+        ops._client.dir_api.create.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_cp_file(self, ops, mocker):
@@ -204,7 +232,7 @@ class TestOps:
         ops._client.file_api.copy.assert_called_once_with(
             mock_dest_dir, mock_source_file, "new_file.txt"
         )
-        assert result == (mock_source_file, mock_copied_file)
+        assert result == mock_copied_file
 
     @pytest.mark.asyncio
     async def test_cp_file_same_name(self, ops, mocker):

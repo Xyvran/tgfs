@@ -832,7 +832,7 @@ class TestIntegrationScenarios:
 
         # Create a subdirectory
         mock_repo.create_file.return_value = Mock()
-        sub_dir = root_dir.create_dir("documents", None)
+        sub_dir = root_dir.create_dir("documents")
 
         # Create file references
         file_ref1 = sub_dir.create_file_ref("report", 11111)

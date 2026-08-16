@@ -62,7 +62,7 @@ class TestDirectoryApi:
         root = TGFSDirectory.root_dir()
         root.create_file_ref("top.txt", 10)
 
-        sub = root.create_dir("sub", None)
+        sub = root.create_dir("sub")
         sub.create_file_ref("inner.txt", 20)
 
         async def fake_collect(frs: list[TGFSFileRef]):
@@ -94,9 +94,9 @@ class TestDirectoryApi:
         self, dir_api, mock_metadata_api, mock_message_api
     ):
         root = TGFSDirectory.root_dir()
-        src = root.create_dir("src", None)
-        dest = root.create_dir("dest", None)
-        moved_me = src.create_dir("moved_me", None)
+        src = root.create_dir("src")
+        dest = root.create_dir("dest")
+        moved_me = src.create_dir("moved_me")
         moved_me.create_file_ref("inner.txt", 20)
 
         result = await dir_api.move(moved_me, dest)
@@ -113,8 +113,8 @@ class TestDirectoryApi:
     @pytest.mark.asyncio
     async def test_move_can_rename(self, dir_api):
         root = TGFSDirectory.root_dir()
-        src = root.create_dir("src", None)
-        dest = root.create_dir("dest", None)
+        src = root.create_dir("src")
+        dest = root.create_dir("dest")
 
         await dir_api.move(src, dest, "renamed")
 

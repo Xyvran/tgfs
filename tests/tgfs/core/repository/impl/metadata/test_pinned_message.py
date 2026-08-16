@@ -209,8 +209,8 @@ class TestTGMsgMetadataRepository:
     ):
         # Create a more complex metadata structure
         root_dir = TGFSDirectory.root_dir()
-        root_dir.create_dir("subdir1", None)
-        root_dir.create_dir("subdir2", None)
+        root_dir.create_dir("subdir1")
+        root_dir.create_dir("subdir2")
         complex_metadata = TGFSMetadata(root_dir)
 
         mock_message_api.get_pinned_message.return_value = sample_pinned_message
@@ -291,7 +291,7 @@ class TestTGMsgMetadataRepository:
         mock_fc_repo.reset_mock()
 
         # Modify metadata and push again
-        sample_metadata.dir.create_dir("new_dir", None)
+        sample_metadata.dir.create_dir("new_dir")
         await repository.push()
 
         # Should call update again, not save

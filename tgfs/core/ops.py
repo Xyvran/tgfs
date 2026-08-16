@@ -1,4 +1,5 @@
 import os.path
+from contextlib import AbstractAsyncContextManager, nullcontext
 from typing import AsyncIterator
 
 from tgfs.errors import FileOrDirectoryDoesNotExist, InvalidPath
@@ -52,9 +53,12 @@ class Ops:
         file_ref = self.stat_file(path)
         return await self._client.file_api.desc(file_ref)
 
-    async def cp_dir(
-        self, path_from: str, path_to: str
-    ) -> tuple[TGFSDirectory, TGFSDirectory]:
+    async def cp_dir(self, path_from: str, path_to: str) -> TGFSDirectory:
+        """Recursively copy a directory into a new, independent one.
+
+        Every file below it is copied with ``FileApi.copy``, which does not
+        move any content: the whole subtree costs API calls, not bandwidth.
+        """
         self._validate_path(path_from)
 
         dirname_from, basename_from = os.path.dirname(path_from), os.path.basename(
@@ -67,15 +71,30 @@ class Ops:
         dirname_to, basename_to = os.path.dirname(path_to), os.path.basename(path_to)
         d2 = self.cd(dirname_to)
 
-        res = await self._client.dir_api.create(
-            basename_to or basename_from, d2, dir_to_copy
-        )
+        if dir_to_copy.is_ancestor_of(d2):
+            raise InvalidPath(f"{path_from} cannot be copied into itself")
 
-        return dir_to_copy, res
+        async with self._metadata_batch():
+            return await self._copy_dir_into(
+                dir_to_copy, d2, basename_to or basename_from
+            )
 
-    async def cp_file(
-        self, path_from: str, path_to: str
-    ) -> tuple[TGFSFileRef, TGFSFileRef]:
+    def _metadata_batch(self) -> AbstractAsyncContextManager[None]:
+        """Collapse the metadata writes of a bulk operation into one."""
+        metadata_api = self._client.metadata_api
+        return metadata_api.batch() if metadata_api else nullcontext()
+
+    async def _copy_dir_into(
+        self, dir_to_copy: TGFSDirectory, under: TGFSDirectory, name: str
+    ) -> TGFSDirectory:
+        copied = await self._client.dir_api.create(name, under)
+        for fr in dir_to_copy.find_files():
+            await self._client.file_api.copy(copied, fr)
+        for child in dir_to_copy.find_dirs():
+            await self._copy_dir_into(child, copied, child.name)
+        return copied
+
+    async def cp_file(self, path_from: str, path_to: str) -> TGFSFileRef:
         self._validate_path(path_from)
 
         dirname_from, basename_from = os.path.dirname(path_from), os.path.basename(
@@ -88,11 +107,9 @@ class Ops:
         dirname_to, basename_to = os.path.dirname(path_to), os.path.basename(path_to)
         d2 = self.cd(dirname_to)
 
-        res = await self._client.file_api.copy(
+        return await self._client.file_api.copy(
             d2, file_to_copy, basename_to or basename_from
         )
-
-        return file_to_copy, res
 
     async def mkdir(self, path: str, parents: bool) -> TGFSDirectory:
         self._validate_path(path)
