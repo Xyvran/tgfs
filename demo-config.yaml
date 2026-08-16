@@ -61,6 +61,34 @@ tgfs:
     host: 0.0.0.0
     port: 1900
   # ---------------------------------------------------------------------------
+  # Optional SFTP interface, served next to WebDAV.
+  #
+  # It exposes the same file tree and reuses the `users` above, so a readonly
+  # user stays readonly here too. It needs a port of its own -- SSH cannot
+  # share the HTTP port.
+  #
+  # `host_key_file` is created on first start (ed25519, mode 0600) when it is
+  # missing. Back it up: without it every restart presents a new host key and
+  # clients refuse to connect until their known_hosts entry is cleared.
+  #
+  # `authorized_keys_dir` (optional) additionally enables public key login:
+  # one file <dir>/<username> per user, in the usual authorized_keys format.
+  # The user must still be listed under `users` so the readonly flag applies.
+  #
+  # `upload_buffer_size_mb` (default 64) is how much of an incoming upload is
+  # held in memory before it spills to `upload_buffer_dir` (system temp when
+  # empty). SFTP does not announce the file size up front while Telegram
+  # uploads need it, so a whole file has to be buffered before it is sent.
+  # ---------------------------------------------------------------------------
+  sftp:
+    enabled: false
+    host: 0.0.0.0
+    port: 2222
+    host_key_file: sftp_host_key
+    # authorized_keys_dir: sftp_authorized_keys
+    # upload_buffer_size_mb: 64
+    # upload_buffer_dir: ''
+  # ---------------------------------------------------------------------------
   # Optional at-rest encryption.
   #
   # When ``enabled: true``, every file uploaded through TGFS is encrypted with

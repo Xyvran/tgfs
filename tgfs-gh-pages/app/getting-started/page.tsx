@@ -4,6 +4,8 @@ import { Apps, ArrowBack, Settings } from "@mui/icons-material";
 import {
   Box,
   Button,
+  Checkbox,
+  FormControlLabel,
   Step,
   StepContent,
   StepLabel,
@@ -21,6 +23,8 @@ export default function GettingStarted() {
   const [pathStyle, setPathStyle] = useState<"unix" | "windows">("unix");
   const [dockerConfig, setDockerConfig] = useState({
     tgfsPort: 1900,
+    sftpEnabled: false,
+    sftpPort: 2222,
     mountedVolume: "/home/user/.tgfs",
   });
 
@@ -314,6 +318,43 @@ export default function GettingStarted() {
                     />
                   </Box>
 
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <FormControlLabel
+                      label="Publish the SFTP port too"
+                      control={
+                        <Checkbox
+                          checked={dockerConfig.sftpEnabled}
+                          onChange={(e) =>
+                            setDockerConfig((prev) => ({
+                              ...prev,
+                              sftpEnabled: e.target.checked,
+                            }))
+                          }
+                        />
+                      }
+                    />
+                    {dockerConfig.sftpEnabled && (
+                      <TextField
+                        label="SFTP Port"
+                        type="number"
+                        size="small"
+                        value={dockerConfig.sftpPort}
+                        onChange={(e) =>
+                          setDockerConfig((prev) => ({
+                            ...prev,
+                            sftpPort: parseInt(e.target.value) || 2222,
+                          }))
+                        }
+                      />
+                    )}
+                  </Box>
+                  {dockerConfig.sftpEnabled && (
+                    <Typography variant="body2" color="text.secondary">
+                      Only needed when <code>tgfs.sftp.enabled</code> is set in
+                      your config.yaml. Use the same port there.
+                    </Typography>
+                  )}
+
                   <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
                     <Typography variant="body2" color="text.secondary">
                       Path Style:
@@ -348,7 +389,11 @@ export default function GettingStarted() {
                   <code className="text-sm text-slate-300 block break-all">
                     docker run -it -v {dockerConfig.mountedVolume}
                     :/home/tgfs/.tgfs -p {dockerConfig.tgfsPort}:
-                    {dockerConfig.tgfsPort} xyvran/tgfs
+                    {dockerConfig.tgfsPort}
+                    {dockerConfig.sftpEnabled
+                      ? ` -p ${dockerConfig.sftpPort}:${dockerConfig.sftpPort}`
+                      : ""}{" "}
+                    xyvran/tgfs
                   </code>
                 </div>
 

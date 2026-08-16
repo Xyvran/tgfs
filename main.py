@@ -16,6 +16,7 @@ from uvicorn.config import Config as UvicornConfig
 from uvicorn.server import Server
 
 from tgfs.app import create_app
+from tgfs.app.sftp import start_sftp_server
 from tgfs.config import Config, get_config
 from tgfs.core import Client, Clients
 from tgfs.telegram import PyrogramAPI, TDLibApi, TelethonAPI, pyrogram, telethon
@@ -77,12 +78,27 @@ async def run_server(app, host: str, port: int, name: str):
 
 
 async def main():
+    logger = logging.getLogger(__name__)
     config = get_config()
 
     clients = await create_clients(config)
 
     app = create_app(clients, config)
-    await run_server(app, config.tgfs.server.host, config.tgfs.server.port, "TGFS")
+
+    try:
+        sftp_acceptor = await start_sftp_server(clients, config)
+    except Exception as ex:
+        # A broken SFTP setup (port taken, unwritable host key) must not keep
+        # the HTTP interface from coming up.
+        logger.error("Failed to start the SFTP server: %s", ex)
+        sftp_acceptor = None
+
+    try:
+        await run_server(app, config.tgfs.server.host, config.tgfs.server.port, "TGFS")
+    finally:
+        if sftp_acceptor:
+            sftp_acceptor.close()
+            await sftp_acceptor.wait_closed()
 
 
 if __name__ == "__main__":

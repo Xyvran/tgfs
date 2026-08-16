@@ -1,4 +1,6 @@
 config.yaml
+sftp_host_key
+sftp_host_key.pub
 /**/__pycache__/
 .idea
 .vscode/

@@ -42,8 +42,10 @@ COPY main.py ./
 RUN useradd --create-home --shell /bin/bash tgfs
 USER tgfs
 
-# Expose WebDAV port
+# HTTP (WebDAV + manager API)
 EXPOSE 1900
+# SFTP, when tgfs.sftp.enabled is set in the config
+EXPOSE 2222
 
 ENV DATA_DIR=/home/tgfs/.tgfs
 
