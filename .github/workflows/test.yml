@@ -1,10 +1,12 @@
 name: Test and Coverage
 
 on:
+  # Every branch, so a feature branch is validated before it reaches a
+  # pull request -- not only master.
   push:
-    branches: [ master ]
   pull_request:
     branches: [ master ]
+  workflow_dispatch:
 
 jobs:
   test:
@@ -57,7 +59,10 @@ jobs:
       run: |
         poetry run pytest --cov --cov-branch --cov-report=xml
 
+    # Only where it ran before this workflow was widened to all branches, so a
+    # coverage upload cannot redden a feature branch.
     - name: Upload coverage reports to Codecov
+      if: github.event_name == 'pull_request' || github.ref == 'refs/heads/master'
       uses: codecov/codecov-action@v6
       with:
         token: ${{ secrets.CODECOV_TOKEN }}

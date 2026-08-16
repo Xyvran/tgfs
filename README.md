@@ -361,3 +361,33 @@ Before committing and pushing, run the following command to install git hooks:
 ```bash
 pre-commit install
 ```
+
+### Preview builds
+
+Pushing any branch other than `master` runs the full test suite and, in
+parallel, builds a Docker image from that exact commit so a change can be tried
+out on a real machine before it is merged. The release tags are never touched.
+
+```bash
+docker pull xyvran/tgfs:preview-<commit>     # pinned to one commit
+docker pull xyvran/tgfs:preview              # whichever branch built last
+```
+
+The commit-pinned tag is printed as a ready-to-copy command in the workflow run
+summary; prefer it whenever more than one branch is in flight. The frontend is
+built the same way as `xyvran/tgfs-fe:preview-<commit>`.
+
+Preview images are amd64 only (release images are also arm64) and are built
+before the test workflow finishes, so a green preview image is not a statement
+about the tests. Both images are smoke-checked first, though: the backend has to
+serve a working SFTP session and the frontend has to answer on `/tgfs/`, so a
+broken build never reaches the registry.
+
+These tags accumulate — delete them from Docker Hub once a branch is merged.
+
+The backend smoke check runs against any image, locally too:
+
+```bash
+docker run --rm -v "$PWD/scripts:/app/scripts:ro" xyvran/tgfs:preview \
+  python scripts/docker_smoke_check.py
+```

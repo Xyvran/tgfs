@@ -1,0 +1,131 @@
+# Preview images for feature branches.
+#
+# Kept separate from docker-build-push on purpose: that workflow owns the
+# release tags and only ever runs off master. Nothing in this file may write
+# `latest`, and the string does not appear here at all.
+name: docker-preview
+
+on:
+  push:
+    branches-ignore: [ master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    # Belt and braces: the release branch is served by docker-build-push.
+    if: github.ref != 'refs/heads/master'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: tgfs
+            dockerfile: Dockerfile
+            repository: xyvran/tgfs
+          - name: tgfs-fe
+            dockerfile: Dockerfile.frontend
+            repository: xyvran/tgfs-fe
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Prepare build
+        id: prep
+        env:
+          REPOSITORY: ${{ matrix.repository }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          # Tags come from the commit, never from the branch name, so they are
+          # stable regardless of how a branch is called or renamed.
+          short="${GITHUB_SHA::12}"
+          image="${REPOSITORY}:preview-${short}"
+          {
+            echo "image=${image}"
+            echo "tags=${REPOSITORY}:preview,${image}"
+            # Forks have no access to the registry secrets; there the job still
+            # builds and smoke-tests, it just does not publish.
+            echo "can_push=$([ -n "${DOCKERHUB_TOKEN}" ] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.name }}
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          # Load into the local daemon first so the image can be exercised
+          # before anything reaches the registry.
+          load: true
+          push: false
+          tags: ${{ steps.prep.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+
+      - name: Smoke test the SFTP server
+        if: matrix.name == 'tgfs'
+        run: |
+          docker run --rm \
+            -v "$PWD/scripts:/app/scripts:ro" \
+            "${{ steps.prep.outputs.image }}" \
+            python scripts/docker_smoke_check.py
+
+      - name: Smoke test the frontend
+        if: matrix.name == 'tgfs-fe'
+        run: |
+          docker run -d --name tgfs-fe-smoke -p 8080:80 \
+            "${{ steps.prep.outputs.image }}"
+          for _ in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/tgfs/ || true)
+            [ "$code" = "200" ] && break
+            sleep 1
+          done
+          docker logs tgfs-fe-smoke
+          docker rm -f tgfs-fe-smoke
+          if [ "$code" != "200" ]; then
+            echo "::error::the frontend did not serve /tgfs/ (last status: ${code:-none})"
+            exit 1
+          fi
+
+      - name: Login to Docker Hub
+        if: steps.prep.outputs.can_push == 'true'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push ${{ matrix.name }}
+        if: steps.prep.outputs.can_push == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.prep.outputs.tags }}
+          # Everything is already in the cache from the build above, so this
+          # only uploads layers.
+          cache-from: type=gha
+
+      - name: Summarise
+        if: steps.prep.outputs.can_push == 'true'
+        run: |
+          {
+            echo "### ${{ matrix.name }} preview image"
+            echo
+            echo '```bash'
+            echo "docker pull ${{ steps.prep.outputs.image }}"
+            echo '```'
+            echo
+            echo "Also tagged \`${{ matrix.repository }}:preview\`, which moves with every"
+            echo "feature-branch build. Use the commit-pinned tag above when that matters."
+          } >> "$GITHUB_STEP_SUMMARY"
