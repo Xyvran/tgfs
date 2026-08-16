@@ -28,7 +28,7 @@ import os
 import sys
 import tempfile
 
-PORT = 22222
+PORT = int(os.environ.get("TGFS_SMOKE_PORT", "22222"))
 USERNAME = "smoke"
 PASSWORD = "smoke-password"  # noqa: S105 - throwaway credential for this check
 
@@ -148,6 +148,12 @@ if __name__ == "__main__":
     # asyncssh narrates every packet exchange at INFO, which would bury the few
     # lines that actually say whether the check passed.
     logging.getLogger("asyncssh").setLevel(logging.WARNING)
+
+    # The image installs its dependencies with --no-root, so the application
+    # is importable only from its root directory -- which is not where a
+    # script under scripts/ starts out. Put it on the path explicitly so the
+    # check runs the same way however it is invoked.
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     DATA_DIR = prepare_environment()
 
