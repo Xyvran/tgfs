@@ -45,8 +45,6 @@ telegram:
   #   strict: false
 tgfs:
   users:
-  download:
-    chunk_size_kb: 1024
   jwt:
     secret: hidden
     algorithm: HS256
@@ -110,7 +108,9 @@ tgfs:
   # makes overlapping reads -- video seeking, SFTP clients walking a file
   # in small reads -- stop re-fetching the same bytes. 0 disables it.
   # ``chunk_cache_readahead`` additionally pulls that many blocks past
-  # each request, so the next sequential read is already there.
+  # each request, so the next sequential read is already there, and
+  # ``chunk_cache_block_kb`` is the unit it caches in -- a read of a few
+  # kilobytes pulls a whole block.
   # ---------------------------------------------------------------------------
   # transfer:
   #   upload_workers_small: 3
@@ -122,6 +122,7 @@ tgfs:
   #   connection_pool_size: 1
   #   chunk_cache_mb: 0
   #   chunk_cache_readahead: 2
+  #   chunk_cache_block_kb: 1024
 
   # ---------------------------------------------------------------------------
   # Optional at-rest encryption.

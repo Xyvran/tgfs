@@ -484,7 +484,7 @@ class TestTelethonAPI:
         telethon_api._client.iter_download = mock_iter_download
 
         req = DownloadFileReq(
-            chat=mock_chat, message_id=54321, begin=0, end=99, chunk_size=32
+            chat=mock_chat, message_id=54321, begin=0, end=99
         )
 
         result = await telethon_api.download_file(req)
@@ -521,7 +521,6 @@ class TestTelethonAPI:
                     message_id=54321,
                     begin=begin,
                     end=begin + 99,
-                    chunk_size=32,
                 )
             )
             async for _ in resp.chunks:
@@ -555,7 +554,7 @@ class TestTelethonAPI:
 
         resp = await telethon_api.download_file(
             DownloadFileReq(
-                chat=mock_chat, message_id=54321, begin=0, end=5, chunk_size=32
+                chat=mock_chat, message_id=54321, begin=0, end=5
             )
         )
         chunks = [chunk async for chunk in resp.chunks]
@@ -585,7 +584,7 @@ class TestTelethonAPI:
 
         resp = await telethon_api.download_file(
             DownloadFileReq(
-                chat=mock_chat, message_id=54321, begin=0, end=5, chunk_size=32
+                chat=mock_chat, message_id=54321, begin=0, end=5
             )
         )
 
@@ -601,7 +600,7 @@ class TestTelethonAPI:
         telethon_api._client.get_messages.return_value = total_list
 
         req = DownloadFileReq(
-            chat=mock_chat, message_id=12345, begin=0, end=99, chunk_size=32
+            chat=mock_chat, message_id=12345, begin=0, end=99
         )
 
         with pytest.raises(UnDownloadableMessage):
@@ -620,7 +619,7 @@ class TestTelethonAPI:
         telethon_api._client.iter_download = mock_iter_download
 
         req = DownloadFileReq(
-            chat=mock_chat, message_id=54321, begin=100, end=50, chunk_size=32
+            chat=mock_chat, message_id=54321, begin=100, end=50
         )
 
         result = await telethon_api.download_file(req)
@@ -631,7 +630,7 @@ class TestTelethonAPI:
                 pass
 
     @pytest.mark.asyncio
-    async def test_download_file_chunk_size_larger_than_remaining(
+    async def test_download_file_trims_a_chunk_larger_than_the_range(
         self, telethon_api, mock_chat, mock_document_message
     ):
         total_list = TotalList([mock_document_message])
@@ -646,8 +645,7 @@ class TestTelethonAPI:
             chat=mock_chat,
             message_id=54321,
             begin=0,
-            end=9,
-            chunk_size=32,  # Only 10 bytes needed
+            end=9,  # Only 10 bytes needed
         )
 
         result = await telethon_api.download_file(req)

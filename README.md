@@ -357,6 +357,7 @@ tgfs:
     connection_pool_size: 1
     chunk_cache_mb: 0
     chunk_cache_readahead: 2
+    chunk_cache_block_kb: 1024
 ```
 
 **Downloads** are cut into pieces and several are fetched at once. Bytes
@@ -373,9 +374,11 @@ extra connections are what let a single bot overlap transfers.
 
 **The chunk cache** (`chunk_cache_mb`, off by default) keeps downloaded
 blocks in memory. It pays off for readers that revisit bytes: seeking in a
-video, and SFTP clients that walk a file in small reads.
-`chunk_cache_readahead` additionally pulls that many blocks past each
-request so the next sequential read is already in memory.
+video, and SFTP clients that walk a file in small reads. A read of a few
+kilobytes pulls a whole `chunk_cache_block_kb` block, so a larger block
+serves more of the reads that follow it and wastes more on readers that
+jump around. `chunk_cache_readahead` additionally pulls that many blocks
+past each request so the next sequential read is already in memory.
 
 **Rate limits.** More parallelism means more requests per second. Telegram
 answers a flood with a wait, which TGFS honours; if uploads start logging

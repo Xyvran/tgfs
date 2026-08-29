@@ -2,7 +2,6 @@ import pytest
 from tgfs.config import (
     WebDAVConfig,
     ManagerConfig,
-    DownloadConfig,
     UserConfig,
     JWTConfig,
     ServerConfig,
@@ -34,14 +33,6 @@ class TestManagerConfig:
 
         assert config.host == "0.0.0.0"
         assert config.port == 9000
-
-
-class TestDownloadConfig:
-    def test_from_dict(self):
-        data = {"chunk_size_kb": 1024}
-        config = DownloadConfig.from_dict(data)
-
-        assert config.chunk_size_kb == 1024
 
 
 class TestUserConfig:
@@ -90,14 +81,12 @@ class TestTGFSConfig:
     def test_from_dict_minimal(self):
         data = {
             "users": {},
-            "download": {"chunk_size_kb": 512},
             "jwt": {"secret": "test", "algorithm": "HS256", "life": 1800},
             "server": {"host": "localhost", "port": 3000},
         }
         config = TGFSConfig.from_dict(data)
 
         assert config.users == {}
-        assert config.download.chunk_size_kb == 512
         assert config.jwt.secret == "test"
         assert config.server.host == "localhost"
 
@@ -107,7 +96,6 @@ class TestTGFSConfig:
                 "admin": {"password": "admin123", "readonly": False},
                 "viewer": {"password": "view123", "readonly": True},
             },
-            "download": {"chunk_size_kb": 512},
             "jwt": {"secret": "test", "algorithm": "HS256", "life": 1800},
             "server": {"host": "localhost", "port": 3000},
         }
@@ -122,7 +110,6 @@ class TestTGFSConfig:
     def test_from_dict_no_users(self):
         data = {
             "users": None,
-            "download": {"chunk_size_kb": 512},
             "jwt": {"secret": "test", "algorithm": "HS256", "life": 1800},
             "server": {"host": "localhost", "port": 3000},
         }
@@ -133,7 +120,6 @@ class TestTGFSConfig:
     def test_from_dict_without_sftp_block(self):
         data = {
             "users": {},
-            "download": {"chunk_size_kb": 512},
             "jwt": {"secret": "test", "algorithm": "HS256", "life": 1800},
             "server": {"host": "localhost", "port": 3000},
         }
@@ -145,7 +131,6 @@ class TestTGFSConfig:
     def test_from_dict_with_sftp_block(self):
         data = {
             "users": {},
-            "download": {"chunk_size_kb": 512},
             "jwt": {"secret": "test", "algorithm": "HS256", "life": 1800},
             "server": {"host": "localhost", "port": 3000},
             "sftp": {"enabled": True, "port": 2200},
@@ -209,7 +194,6 @@ class TestTransferConfig:
         config = TGFSConfig.from_dict(
             {
                 "users": {},
-                "download": {"chunk_size_kb": 512},
                 "jwt": {"secret": "test", "algorithm": "HS256", "life": 1800},
                 "server": {"host": "localhost", "port": 3000},
             }
@@ -322,7 +306,6 @@ class TestConfig:
             },
             "tgfs": {
                 "users": {},
-                "download": {"chunk_size_kb": 1024},
                 "jwt": {"secret": "jwt_secret", "algorithm": "HS256", "life": 3600},
                 "server": {"host": "0.0.0.0", "port": 8080},
             },
@@ -330,7 +313,6 @@ class TestConfig:
         config = Config.from_dict(data)
 
         assert config.telegram.api_id == 12345
-        assert config.tgfs.download.chunk_size_kb == 1024
 
 
 class TestConfigFunctions:
@@ -352,7 +334,6 @@ class TestConfigFunctions:
             },
             "tgfs": {
                 "users": {},
-                "download": {"chunk_size_kb": 1024},
                 "jwt": {"secret": "jwt_secret", "algorithm": "HS256", "life": 3600},
                 "server": {"host": "0.0.0.0", "port": 8080},
             },

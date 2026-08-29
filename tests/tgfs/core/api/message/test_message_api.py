@@ -304,7 +304,6 @@ class TestMessageApi:
         assert isinstance(call_args, DownloadFileReq)
         assert call_args.chat == mock_private_channel
         assert call_args.message_id == 12345
-        assert call_args.chunk_size == 512
         assert call_args.begin == 0
         assert call_args.end == 99
         assert result == mock_response

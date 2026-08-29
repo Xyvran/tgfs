@@ -34,15 +34,6 @@ class ManagerConfig:
 
 
 @dataclass
-class DownloadConfig:
-    chunk_size_kb: int
-
-    @classmethod
-    def from_dict(cls, data: dict) -> Self:
-        return cls(chunk_size_kb=data["chunk_size_kb"])
-
-
-@dataclass
 class UserConfig:
     password: str
     readonly: bool
@@ -315,7 +306,10 @@ class TransferConfig:
     already spread across them.
 
     ``chunk_cache_mb`` is the memory budget for caching downloaded bytes;
-    ``0`` disables the cache.
+    ``0`` disables the cache. ``chunk_cache_block_kb`` is the unit it caches
+    in: a read of a few kilobytes pulls a whole block, so a larger block
+    serves more of the reads that follow and wastes more on the ones that
+    jump around.
     """
 
     upload_workers_small: int
@@ -327,6 +321,7 @@ class TransferConfig:
     connection_pool_size: int
     chunk_cache_mb: int
     chunk_cache_readahead: int
+    chunk_cache_block_kb: int
 
     DEFAULT_UPLOAD_WORKERS_SMALL = 3
     DEFAULT_UPLOAD_WORKERS_BIG = 8
@@ -340,6 +335,7 @@ class TransferConfig:
     DEFAULT_CONNECTION_POOL_SIZE = 1
     DEFAULT_CHUNK_CACHE_MB = 0
     DEFAULT_CHUNK_CACHE_READAHEAD = 2
+    DEFAULT_CHUNK_CACHE_BLOCK_KB = 1024
 
     @property
     def download_piece_size_bytes(self) -> int:
@@ -356,6 +352,10 @@ class TransferConfig:
     @property
     def chunk_cache_bytes(self) -> int:
         return self.chunk_cache_mb * 1024 * 1024
+
+    @property
+    def chunk_cache_block_bytes(self) -> int:
+        return self.chunk_cache_block_kb * 1024
 
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "TransferConfig":
@@ -407,13 +407,15 @@ class TransferConfig:
             chunk_cache_readahead=non_negative(
                 "chunk_cache_readahead", cls.DEFAULT_CHUNK_CACHE_READAHEAD
             ),
+            chunk_cache_block_kb=positive(
+                "chunk_cache_block_kb", cls.DEFAULT_CHUNK_CACHE_BLOCK_KB
+            ),
         )
 
 
 @dataclass
 class TGFSConfig:
     users: dict[str, UserConfig]
-    download: DownloadConfig
     jwt: JWTConfig
     metadata: Dict[str, MetadataConfig]
     server: ServerConfig
@@ -434,7 +436,6 @@ class TGFSConfig:
                 if data["users"]
                 else {}
             ),
-            download=DownloadConfig.from_dict(data["download"]),
             jwt=JWTConfig.from_dict(data["jwt"]),
             metadata={
                 k: MetadataConfig.from_dict(v) for k, v in metadata_config.items()

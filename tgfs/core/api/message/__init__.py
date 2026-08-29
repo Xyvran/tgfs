@@ -51,6 +51,10 @@ DELETE_BATCH_SIZE = 100
 # is actually waiting on.
 MAX_READAHEAD_TASKS = 4
 
+# Telegram addresses file content in 4 KiB units, so nothing smaller can
+# arrive as a chunk. Used only to turn a byte budget into a queue length.
+MIN_STREAM_CHUNK = 4096
+
 
 rate = Rate(20, Duration.SECOND)
 bucket = InMemoryBucket([rate])
@@ -265,7 +269,6 @@ class MessageApi(MessageBroker):
                 DownloadFileReq(
                     chat=self.private_file_channel,
                     message_id=message_id,
-                    chunk_size=get_config().tgfs.download.chunk_size_kb,
                     begin=begin,
                     end=end,
                 )
@@ -280,7 +283,6 @@ class MessageApi(MessageBroker):
     ) -> DownloadFileResp:
         transfer = _transfer()
         piece_size = transfer.download_piece_size_bytes
-        chunk_bytes = get_config().tgfs.download.chunk_size_kb * 1024
 
         pieces = [
             self._download_piece(message_id, piece_begin, piece_end)
@@ -291,8 +293,12 @@ class MessageApi(MessageBroker):
 
         # A piece has to fit in its queue, otherwise a piece that is ready
         # early blocks instead of freeing its bot for the next one -- which
-        # is what would keep the download sequential in all but name.
-        queue_depth = max(1, -(-piece_size // max(1, chunk_bytes)))
+        # is what would keep the download sequential in all but name. The
+        # queue counts chunks, whose size the Telegram library picks, so the
+        # bound is derived from the smallest one it could hand out. This does
+        # not risk memory: a source here is a single piece, so it cannot
+        # produce more than one piece worth of bytes however deep its queue.
+        queue_depth = max(1, -(-piece_size // MIN_STREAM_CHUNK))
 
         return DownloadFileResp(
             chunks=prefetching_chain(
@@ -409,7 +415,7 @@ class MessageApi(MessageBroker):
         if end < begin:
             return None
 
-        block_size = max(1, get_config().tgfs.download.chunk_size_kb * 1024)
+        block_size = _transfer().chunk_cache_block_bytes
         self._schedule_readahead(message_id, end // block_size, size, block_size)
 
         return DownloadFileResp(
@@ -485,7 +491,6 @@ class MessageApi(MessageBroker):
                 DownloadFileReq(
                     chat=self.private_file_channel,
                     message_id=message_id,
-                    chunk_size=get_config().tgfs.download.chunk_size_kb,
                     begin=begin,
                     end=end,
                 )
@@ -502,7 +507,6 @@ class MessageApi(MessageBroker):
             DownloadFileReq(
                 chat=self.private_file_channel,
                 message_id=message_id,
-                chunk_size=get_config().tgfs.download.chunk_size_kb,
                 begin=begin,
                 end=end,
             )

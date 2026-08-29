@@ -96,6 +96,18 @@ Fetches are rounded out to whole block boundaries, which is what makes the
 cache useful for small reads: an SFTP client reading 32 KiB at a time pulls
 one block and then hits it for the rest of that megabyte.
 
+## One knob removed
+
+`tgfs.download.chunk_size_kb` used to set the size of the chunks a download
+stream hands out. It is gone, because it did not mean anything to either
+library it was passed to. Pyrogram's `get_file` has no such parameter and
+silently ignored it; Telethon caps a file request at 512 KiB, which the
+default of 1024 exceeded. The one place the value still mattered was the
+size of a cache block, and that is what it became:
+`transfer.chunk_cache_block_kb`. Both libraries now use the request size
+they were going to use anyway, and a configuration that still carries the
+old block keeps loading -- the key is simply ignored.
+
 ## What is deliberately not tuned
 
 `is_big_file` used to decide two unrelated things: which upload RPC to use,

@@ -21,7 +21,7 @@ from tgfs.utils.message_cache import global_message_cache
 
 CHANNEL = 777
 MESSAGE = 42
-BLOCK = 512 * 1024  # config-test.yaml sets download.chunk_size_kb to 512
+BLOCK = 1024 * 1024  # the default transfer.chunk_cache_block_kb
 FILE_SIZE = BLOCK * 3 + 100  # three full blocks and a short one
 
 

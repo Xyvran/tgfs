@@ -281,8 +281,6 @@ class TelethonAPI(ITDLibClient):
     async def download_file(self, req: DownloadFileReq) -> DownloadFileResp:
         document = await self._document_for(req.chat, req.message_id)
 
-        chunk_size = req.chunk_size * 1024
-
         bytes_to_read = req.end - req.begin + 1
 
         async def chunks():
@@ -306,7 +304,6 @@ class TelethonAPI(ITDLibClient):
                             file_reference=doc.file_reference,
                             thumb_size="",
                         ),
-                        chunk_size=chunk_size,
                         offset=offset,
                     ):
                         if len(chunk) > rest:

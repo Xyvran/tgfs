@@ -60,6 +60,22 @@ interface SftpConfig {
   upload_buffer_size_mb: number;
 }
 
+interface TransferConfig {
+  // UI only: when off, no transfer block is written at all and the
+  // application falls back to its own defaults.
+  enabled: boolean;
+  upload_workers_small: number;
+  upload_workers_big: number;
+  upload_part_size_kb: number;
+  download_piece_size_kb: number;
+  download_pieces_in_flight: number;
+  parallel_download_threshold_mb: number;
+  connection_pool_size: number;
+  chunk_cache_mb: number;
+  chunk_cache_readahead: number;
+  chunk_cache_block_kb: number;
+}
+
 interface ConfigData {
   telegram: {
     api_id: string;
@@ -79,9 +95,6 @@ interface ConfigData {
       username: string;
       password: string;
     }[];
-    download: {
-      chunk_size_kb: number;
-    };
     jwt: {
       secret: string;
       algorithm: string;
@@ -92,6 +105,7 @@ interface ConfigData {
       port: number;
     };
     sftp: SftpConfig;
+    transfer: TransferConfig;
     encryption: EncryptionConfig;
   };
 }
@@ -104,13 +118,13 @@ type ConfigUpdatePaths = {
   "telegram.channels": ChannelConfig[];
   "telegram.bot.tokens": string[];
   "tgfs.users": { username: string; password: string }[];
-  "tgfs.download.chunk_size_kb": number;
   "tgfs.jwt.secret": string;
   "tgfs.jwt.algorithm": string;
   "tgfs.jwt.life": number;
   "tgfs.server.host": string;
   "tgfs.server.port": number;
   "tgfs.sftp": SftpConfig;
+  "tgfs.transfer": TransferConfig;
   "tgfs.encryption": EncryptionConfig;
 };
 
@@ -166,9 +180,6 @@ export default function ConfigGenerator() {
           password: "password",
         },
       ],
-      download: {
-        chunk_size_kb: 1024,
-      },
       jwt: {
         secret: "",
         algorithm: "HS256",
@@ -185,6 +196,19 @@ export default function ConfigGenerator() {
         host_key_file: "sftp_host_key",
         authorized_keys_dir: "",
         upload_buffer_size_mb: 64,
+      },
+      transfer: {
+        enabled: false,
+        upload_workers_small: 3,
+        upload_workers_big: 8,
+        upload_part_size_kb: 512,
+        download_piece_size_kb: 4096,
+        download_pieces_in_flight: 4,
+        parallel_download_threshold_mb: 10,
+        connection_pool_size: 1,
+        chunk_cache_mb: 0,
+        chunk_cache_readahead: 2,
+        chunk_cache_block_kb: 1024,
       },
       encryption: {
         enabled: false,
@@ -221,8 +245,6 @@ export default function ConfigGenerator() {
           username: string;
           password: string;
         }[];
-      } else if (path === "tgfs.download.chunk_size_kb") {
-        newConfig.tgfs.download.chunk_size_kb = value as number;
       } else if (path === "tgfs.jwt.secret") {
         newConfig.tgfs.jwt.secret = value as string;
       } else if (path === "tgfs.jwt.algorithm") {
@@ -235,6 +257,8 @@ export default function ConfigGenerator() {
         newConfig.tgfs.server.port = value as number;
       } else if (path === "tgfs.sftp") {
         newConfig.tgfs.sftp = value as SftpConfig;
+      } else if (path === "tgfs.transfer") {
+        newConfig.tgfs.transfer = value as TransferConfig;
       } else if (path === "tgfs.encryption") {
         newConfig.tgfs.encryption = value as EncryptionConfig;
       }
@@ -349,7 +373,6 @@ export default function ConfigGenerator() {
           }
           return acc;
         }, {} as { [key: string]: { password: string } }),
-        download: config.tgfs.download,
         jwt: config.tgfs.jwt,
         metadata,
         server: config.tgfs.server,
@@ -374,6 +397,14 @@ export default function ConfigGenerator() {
             block.authorized_keys_dir = sftp.authorized_keys_dir.trim();
           }
           return { sftp: block };
+        })(),
+        ...(() => {
+          const transfer = config.tgfs.transfer;
+          if (!transfer.enabled) return {};
+          // "enabled" only drives this form; it is not a config key.
+          const settings = { ...transfer } as Partial<TransferConfig>;
+          delete settings.enabled;
+          return { transfer: settings };
         })(),
         encryption: (() => {
           const enc = config.tgfs.encryption;
@@ -1110,6 +1141,233 @@ export default function ConfigGenerator() {
                   })
                 }
               />
+            </FormSection>
+
+            <FormSection title="Transfer Performance (Optional)">
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                How file bytes are moved to and from Telegram. Every setting
+                has a default that matches the behaviour you get without this
+                block, so leave it off unless you want to tune something.
+              </Typography>
+              <FormControlLabel
+                label="Tune transfer settings"
+                control={
+                  <Checkbox
+                    checked={config.tgfs.transfer.enabled}
+                    onChange={(e) =>
+                      updateConfig("tgfs.transfer", {
+                        ...config.tgfs.transfer,
+                        enabled: e.target.checked,
+                      })
+                    }
+                  />
+                }
+              />
+              {config.tgfs.transfer.enabled && (
+                <>
+                  <Typography variant="subtitle2" sx={{ mt: 1 }}>
+                    Downloads
+                  </Typography>
+                  <FieldRow>
+                    <ConfigTextField
+                      label="Piece Size (KB)"
+                      type="number"
+                      value={config.tgfs.transfer.download_piece_size_kb}
+                      onChange={(e) =>
+                        updateConfig("tgfs.transfer", {
+                          ...config.tgfs.transfer,
+                          download_piece_size_kb: parseInt(e.target.value),
+                        })
+                      }
+                      width={170}
+                    />
+                    <ConfigTextField
+                      label="Pieces In Flight"
+                      type="number"
+                      value={config.tgfs.transfer.download_pieces_in_flight}
+                      onChange={(e) =>
+                        updateConfig("tgfs.transfer", {
+                          ...config.tgfs.transfer,
+                          download_pieces_in_flight: parseInt(e.target.value),
+                        })
+                      }
+                      width={170}
+                    />
+                    <ConfigTextField
+                      label="Split Above (MB)"
+                      type="number"
+                      value={
+                        config.tgfs.transfer.parallel_download_threshold_mb
+                      }
+                      onChange={(e) =>
+                        updateConfig("tgfs.transfer", {
+                          ...config.tgfs.transfer,
+                          parallel_download_threshold_mb: parseInt(
+                            e.target.value
+                          ),
+                        })
+                      }
+                      width={170}
+                    />
+                  </FieldRow>
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                    sx={{ mb: 1 }}
+                  >
+                    A download is cut into pieces and several are fetched at
+                    once. Bytes have to be handed out in order, so a piece
+                    that arrives early waits its turn:{" "}
+                    <strong>
+                      peak buffering is{" "}
+                      {(
+                        (config.tgfs.transfer.download_piece_size_kb *
+                          config.tgfs.transfer.download_pieces_in_flight) /
+                        1024
+                      ).toFixed(0)}{" "}
+                      MiB per download
+                    </strong>
+                    , for every reader at the same time.
+                  </Typography>
+
+                  <Typography variant="subtitle2" sx={{ mt: 1 }}>
+                    Connections
+                  </Typography>
+                  <ConfigTextField
+                    label="Connections Per Bot"
+                    type="number"
+                    value={config.tgfs.transfer.connection_pool_size}
+                    onChange={(e) =>
+                      updateConfig("tgfs.transfer", {
+                        ...config.tgfs.transfer,
+                        connection_pool_size: parseInt(e.target.value),
+                      })
+                    }
+                    width={200}
+                  />
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                    sx={{ mb: 1 }}
+                  >
+                    Pieces are handed to the bot tokens above in turn, so each
+                    extra token is another connection a download can use. With
+                    a single token, raise this instead: one connection sends
+                    its requests one after another, so extra connections are
+                    what let one bot overlap transfers.
+                  </Typography>
+
+                  <Typography variant="subtitle2" sx={{ mt: 1 }}>
+                    Uploads
+                  </Typography>
+                  <FieldRow>
+                    <ConfigTextField
+                      label="Workers (Small Files)"
+                      type="number"
+                      value={config.tgfs.transfer.upload_workers_small}
+                      onChange={(e) =>
+                        updateConfig("tgfs.transfer", {
+                          ...config.tgfs.transfer,
+                          upload_workers_small: parseInt(e.target.value),
+                        })
+                      }
+                      width={190}
+                    />
+                    <ConfigTextField
+                      label="Workers (Large Files)"
+                      type="number"
+                      value={config.tgfs.transfer.upload_workers_big}
+                      onChange={(e) =>
+                        updateConfig("tgfs.transfer", {
+                          ...config.tgfs.transfer,
+                          upload_workers_big: parseInt(e.target.value),
+                        })
+                      }
+                      width={190}
+                    />
+                    <FormControl size="small" sx={{ minWidth: 150 }}>
+                      <InputLabel>Part Size (KB)</InputLabel>
+                      <Select
+                        label="Part Size (KB)"
+                        value={config.tgfs.transfer.upload_part_size_kb}
+                        onChange={(e) =>
+                          updateConfig("tgfs.transfer", {
+                            ...config.tgfs.transfer,
+                            upload_part_size_kb: Number(e.target.value),
+                          })
+                        }
+                      >
+                        {[64, 128, 256, 512].map((size) => (
+                          <MenuItem key={size} value={size}>
+                            {size}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </FieldRow>
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                    sx={{ mb: 1 }}
+                  >
+                    Telegram only accepts part sizes that divide 512 KB and
+                    caps them there, which is why this is a fixed list. More
+                    workers means more requests per second; if uploads start
+                    logging flood waits, lower this and the connection count
+                    before raising anything else.
+                  </Typography>
+
+                  <Typography variant="subtitle2" sx={{ mt: 1 }}>
+                    Chunk Cache
+                  </Typography>
+                  <FieldRow>
+                    <ConfigTextField
+                      label="Cache Budget (MB)"
+                      type="number"
+                      value={config.tgfs.transfer.chunk_cache_mb}
+                      onChange={(e) =>
+                        updateConfig("tgfs.transfer", {
+                          ...config.tgfs.transfer,
+                          chunk_cache_mb: parseInt(e.target.value),
+                        })
+                      }
+                      width={170}
+                    />
+                    <ConfigTextField
+                      label="Block Size (KB)"
+                      type="number"
+                      value={config.tgfs.transfer.chunk_cache_block_kb}
+                      onChange={(e) =>
+                        updateConfig("tgfs.transfer", {
+                          ...config.tgfs.transfer,
+                          chunk_cache_block_kb: parseInt(e.target.value),
+                        })
+                      }
+                      width={170}
+                    />
+                    <ConfigTextField
+                      label="Read-Ahead Blocks"
+                      type="number"
+                      value={config.tgfs.transfer.chunk_cache_readahead}
+                      onChange={(e) =>
+                        updateConfig("tgfs.transfer", {
+                          ...config.tgfs.transfer,
+                          chunk_cache_readahead: parseInt(e.target.value),
+                        })
+                      }
+                      width={170}
+                    />
+                  </FieldRow>
+                  <Typography variant="body2" color="text.secondary">
+                    Keeps downloaded blocks in memory, so readers that revisit
+                    bytes stop fetching them twice: seeking in a video, or an
+                    SFTP client walking a file in small reads. A budget of 0
+                    disables it. A read of a few kilobytes pulls a whole
+                    block, so a larger block serves more of the reads that
+                    follow and wastes more on readers that jump around.
+                  </Typography>
+                </>
+              )}
             </FormSection>
           </Paper>
         </Box>

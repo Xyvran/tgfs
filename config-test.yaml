@@ -13,8 +13,6 @@ tgfs:
     test_user:
       password: test_password
       readonly: false
-  download:
-    chunk_size_kb: 512
   jwt:
     secret: test_jwt_secret
     algorithm: HS256

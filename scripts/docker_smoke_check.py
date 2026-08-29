@@ -47,8 +47,6 @@ tgfs:
     {username}:
       password: {password}
       readonly: false
-  download:
-    chunk_size_kb: 1024
   jwt:
     secret: smoke
     algorithm: HS256
