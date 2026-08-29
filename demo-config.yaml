@@ -89,6 +89,41 @@ tgfs:
     # upload_buffer_size_mb: 64
     # upload_buffer_dir: ''
   # ---------------------------------------------------------------------------
+  # Optional transfer tuning.
+  #
+  # Every value below has a default that matches the behaviour you get
+  # without this block, so it can be left out entirely.
+  #
+  # Downloads are cut into pieces of ``download_piece_size_kb`` and
+  # ``download_pieces_in_flight`` of them are fetched at the same time.
+  # Bytes have to be handed out in order, so a piece that arrives early
+  # waits for its turn: peak buffering per download is the two multiplied
+  # together -- 16 MiB with the defaults. Raising either speeds up a single
+  # large download and costs memory for every concurrent reader.
+  #
+  # ``connection_pool_size`` is how many MTProto connections each bot
+  # opens. A single connection sends its requests one after another, so a
+  # deployment with only one bot token gains the most here. With several
+  # bot tokens the pieces already spread across them.
+  #
+  # ``chunk_cache_mb`` caches downloaded blocks in memory, which is what
+  # makes overlapping reads -- video seeking, SFTP clients walking a file
+  # in small reads -- stop re-fetching the same bytes. 0 disables it.
+  # ``chunk_cache_readahead`` additionally pulls that many blocks past
+  # each request, so the next sequential read is already there.
+  # ---------------------------------------------------------------------------
+  # transfer:
+  #   upload_workers_small: 3
+  #   upload_workers_big: 8
+  #   upload_part_size_kb: 512      # must divide 512; Telegram caps it there
+  #   download_piece_size_kb: 4096
+  #   download_pieces_in_flight: 4
+  #   parallel_download_threshold_mb: 10
+  #   connection_pool_size: 1
+  #   chunk_cache_mb: 0
+  #   chunk_cache_readahead: 2
+
+  # ---------------------------------------------------------------------------
   # Optional at-rest encryption.
   #
   # When ``enabled: true``, every file uploaded through TGFS is encrypted with

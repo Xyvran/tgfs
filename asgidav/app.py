@@ -168,12 +168,23 @@ def create_app(
                 }
 
                 if is_range_request:
-                    actual_end = end if end != -1 else content_length - 1
+                    # Clients do ask past the end of a file; the body stops
+                    # at the last byte that exists, so the headers have to
+                    # describe that and not what was asked for.
+                    actual_end = min(
+                        end if end != -1 else content_length - 1,
+                        content_length - 1,
+                    )
                     headers["Content-Range"] = (
                         f"bytes {begin}-{actual_end}/{content_length}"
                     )
+                    headers["Content-Length"] = str(max(0, actual_end - begin + 1))
                     status_code = HTTPStatus.PARTIAL_CONTENT
                 else:
+                    # Without a length, a client cannot tell a finished
+                    # download from a truncated one -- and tools that open
+                    # several ranges at once need it to plan them.
+                    headers["Content-Length"] = str(content_length)
                     status_code = HTTPStatus.OK
 
                 return StreamingResponse(

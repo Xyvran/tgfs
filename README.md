@@ -339,6 +339,52 @@ spec:
   your password manager.
 
 
+## Transfer performance
+
+Uploads and downloads are tuned through an optional `transfer` block. Every
+value has a default matching the behaviour you get without the block, so
+existing configurations keep working untouched.
+
+```yaml
+tgfs:
+  transfer:
+    upload_workers_small: 3
+    upload_workers_big: 8
+    upload_part_size_kb: 512      # must divide 512; Telegram caps it there
+    download_piece_size_kb: 4096
+    download_pieces_in_flight: 4
+    parallel_download_threshold_mb: 10
+    connection_pool_size: 1
+    chunk_cache_mb: 0
+    chunk_cache_readahead: 2
+```
+
+**Downloads** are cut into pieces and several are fetched at once. Bytes
+must be handed out in order, so a piece that arrives early waits its turn:
+peak buffering per download is `download_piece_size_kb x
+download_pieces_in_flight`, 16 MiB at the defaults. Raising either speeds
+up a single large download and costs memory for every concurrent reader.
+
+**More bots means more parallelism.** Pieces are handed to the configured
+bot tokens round-robin, so each additional token is another connection a
+single download can use. With one token, raise `connection_pool_size`
+instead: one MTProto connection sends its requests one after another, so
+extra connections are what let a single bot overlap transfers.
+
+**The chunk cache** (`chunk_cache_mb`, off by default) keeps downloaded
+blocks in memory. It pays off for readers that revisit bytes: seeking in a
+video, and SFTP clients that walk a file in small reads.
+`chunk_cache_readahead` additionally pulls that many blocks past each
+request so the next sequential read is already in memory.
+
+**Rate limits.** More parallelism means more requests per second. Telegram
+answers a flood with a wait, which TGFS honours; if uploads start logging
+flood waits, lower `upload_workers_big` and `connection_pool_size` before
+raising anything else.
+
+`scripts/measure_transfer.py` shows what the piece-level parallelism is
+worth against a simulated link, without needing a channel.
+
 ## Development
 
 Install the dependencies:

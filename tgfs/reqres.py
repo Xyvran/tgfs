@@ -1,7 +1,8 @@
+import asyncio
 import os
 from dataclasses import dataclass, field
 from io import IOBase
-from typing import AsyncIterator, Dict, List, Optional, Tuple
+from typing import AsyncIterator, Dict, Optional, Tuple
 
 from tgfs.tasks.integrations import TaskTracker
 
@@ -224,7 +225,9 @@ class FileMessageFromPath(UploadableFileMessage):
         )
 
     async def read(self, length: int) -> bytes:
-        return self._fd.read(length)
+        # Off the event loop: a blocking disk read here stalls every other
+        # transfer in the process, not just this one.
+        return await asyncio.to_thread(self._fd.read, length)
 
     async def close(self) -> None:
         if self._fd:
@@ -267,8 +270,7 @@ class FileMessageFromBuffer(UploadableFileMessage):
 @dataclass
 class FileMessageFromStream(UploadableFileMessage):
     stream: FileContent
-    cached_chunks: List[bytes] = field(default_factory=list)
-    cached_size = 0
+    buffer: bytearray = field(default_factory=bytearray)
 
     @classmethod
     def new(
@@ -289,16 +291,18 @@ class FileMessageFromStream(UploadableFileMessage):
         )
 
     async def read(self, length: int) -> bytes:
-        size_to_return = min(length, self.get_size() - self._read_size)
-        while self.cached_size < size_to_return:
-            chunk = await anext(self.stream)
-            self.cached_chunks.append(chunk)
-            self.cached_size += len(chunk)
+        """Take ``length`` bytes off the front of the stream.
 
-        joined = b"".join(self.cached_chunks)
-        res = joined[:size_to_return]
-        self.cached_chunks = [joined[size_to_return:]]
-        self.cached_size -= size_to_return
+        Kept in one buffer rather than a list of chunks: rejoining the list
+        on every read copies everything still pending, which for a stream
+        arriving in small chunks is quadratic in the size of the part.
+        """
+        size_to_return = min(length, self.get_size() - self._read_size)
+        while len(self.buffer) < size_to_return:
+            self.buffer.extend(await anext(self.stream))
+
+        res = bytes(self.buffer[:size_to_return])
+        del self.buffer[:size_to_return]
         self._read_size += size_to_return
         return res
 
