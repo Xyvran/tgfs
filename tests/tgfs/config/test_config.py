@@ -6,6 +6,7 @@ from tgfs.config import (
     UserConfig,
     JWTConfig,
     ServerConfig,
+    SFTPConfig,
     TGFSConfig,
     Config,
     GithubRepoConfig,
@@ -127,6 +128,78 @@ class TestTGFSConfig:
         config = TGFSConfig.from_dict(data)
 
         assert config.users == {}
+
+    def test_from_dict_without_sftp_block(self):
+        data = {
+            "users": {},
+            "download": {"chunk_size_kb": 512},
+            "jwt": {"secret": "test", "algorithm": "HS256", "life": 1800},
+            "server": {"host": "localhost", "port": 3000},
+        }
+        config = TGFSConfig.from_dict(data)
+
+        assert config.sftp.enabled is False
+        assert config.sftp.port == SFTPConfig.DEFAULT_PORT
+
+    def test_from_dict_with_sftp_block(self):
+        data = {
+            "users": {},
+            "download": {"chunk_size_kb": 512},
+            "jwt": {"secret": "test", "algorithm": "HS256", "life": 1800},
+            "server": {"host": "localhost", "port": 3000},
+            "sftp": {"enabled": True, "port": 2200},
+        }
+        config = TGFSConfig.from_dict(data)
+
+        assert config.sftp.enabled is True
+        assert config.sftp.port == 2200
+
+
+class TestSFTPConfig:
+    def test_defaults(self):
+        config = SFTPConfig.from_dict(None)
+
+        assert config.enabled is False
+        assert config.host == "0.0.0.0"
+        assert config.port == SFTPConfig.DEFAULT_PORT
+        assert config.host_key_file.endswith(SFTPConfig.DEFAULT_HOST_KEY_FILE)
+        assert config.authorized_keys_dir is None
+        assert config.upload_buffer_dir is None
+        assert (
+            config.upload_buffer_size_mb == SFTPConfig.DEFAULT_UPLOAD_BUFFER_SIZE_MB
+        )
+
+    def test_full_block(self):
+        config = SFTPConfig.from_dict(
+            {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 2200,
+                "host_key_file": "keys/host_key",
+                "authorized_keys_dir": "keys/authorized",
+                "upload_buffer_size_mb": 8,
+                "upload_buffer_dir": "spool",
+            }
+        )
+
+        assert config.enabled is True
+        assert config.host == "127.0.0.1"
+        assert config.port == 2200
+        assert config.host_key_file.endswith("host_key")
+        assert config.authorized_keys_dir is not None
+        assert config.authorized_keys_dir.endswith("authorized")
+        assert config.upload_buffer_size_mb == 8
+        assert config.upload_buffer_size_bytes == 8 * 1024 * 1024
+        assert config.upload_buffer_dir is not None
+
+    @pytest.mark.parametrize("port", [0, 65536, -1])
+    def test_rejects_invalid_port(self, port):
+        with pytest.raises(ValueError):
+            SFTPConfig.from_dict({"port": port})
+
+    def test_rejects_negative_buffer_size(self):
+        with pytest.raises(ValueError):
+            SFTPConfig.from_dict({"upload_buffer_size_mb": -1})
 
 
 class TestGithubRepoConfig:

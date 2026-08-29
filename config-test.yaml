@@ -33,3 +33,7 @@ tgfs:
   server:
     host: localhost
     port: 8080
+  sftp:
+    enabled: false
+    host: localhost
+    port: 2222

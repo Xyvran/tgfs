@@ -51,6 +51,15 @@ interface RedundancyConfig {
   strict: boolean;
 }
 
+interface SftpConfig {
+  enabled: boolean;
+  host: string;
+  port: number;
+  host_key_file: string;
+  authorized_keys_dir: string;
+  upload_buffer_size_mb: number;
+}
+
 interface ConfigData {
   telegram: {
     api_id: string;
@@ -82,6 +91,7 @@ interface ConfigData {
       host: string;
       port: number;
     };
+    sftp: SftpConfig;
     encryption: EncryptionConfig;
   };
 }
@@ -100,6 +110,7 @@ type ConfigUpdatePaths = {
   "tgfs.jwt.life": number;
   "tgfs.server.host": string;
   "tgfs.server.port": number;
+  "tgfs.sftp": SftpConfig;
   "tgfs.encryption": EncryptionConfig;
 };
 
@@ -167,6 +178,14 @@ export default function ConfigGenerator() {
         host: "0.0.0.0",
         port: 1900,
       },
+      sftp: {
+        enabled: false,
+        host: "0.0.0.0",
+        port: 2222,
+        host_key_file: "sftp_host_key",
+        authorized_keys_dir: "",
+        upload_buffer_size_mb: 64,
+      },
       encryption: {
         enabled: false,
         encrypt_names: false,
@@ -214,6 +233,8 @@ export default function ConfigGenerator() {
         newConfig.tgfs.server.host = value as string;
       } else if (path === "tgfs.server.port") {
         newConfig.tgfs.server.port = value as number;
+      } else if (path === "tgfs.sftp") {
+        newConfig.tgfs.sftp = value as SftpConfig;
       } else if (path === "tgfs.encryption") {
         newConfig.tgfs.encryption = value as EncryptionConfig;
       }
@@ -332,6 +353,28 @@ export default function ConfigGenerator() {
         jwt: config.tgfs.jwt,
         metadata,
         server: config.tgfs.server,
+        ...(() => {
+          const sftp = config.tgfs.sftp;
+          if (!sftp.enabled) return {};
+          const block: {
+            enabled: boolean;
+            host: string;
+            port: number;
+            host_key_file: string;
+            authorized_keys_dir?: string;
+            upload_buffer_size_mb: number;
+          } = {
+            enabled: true,
+            host: sftp.host,
+            port: sftp.port,
+            host_key_file: sftp.host_key_file,
+            upload_buffer_size_mb: sftp.upload_buffer_size_mb,
+          };
+          if (sftp.authorized_keys_dir.trim() !== "") {
+            block.authorized_keys_dir = sftp.authorized_keys_dir.trim();
+          }
+          return { sftp: block };
+        })(),
         encryption: (() => {
           const enc = config.tgfs.encryption;
           const block: {
@@ -856,6 +899,117 @@ export default function ConfigGenerator() {
                 </a>
                 {")"}.
               </Typography>
+            </FormSection>
+
+            <FormSection title="SFTP (Optional)">
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                Serves the same file tree over SFTP, next to WebDAV, using the
+                same users and the same readonly flags. SSH cannot share the
+                HTTP port, so it needs a port of its own.
+              </Typography>
+              <FormControlLabel
+                label="Enable the SFTP interface"
+                control={
+                  <Checkbox
+                    checked={config.tgfs.sftp.enabled}
+                    onChange={(e) =>
+                      updateConfig("tgfs.sftp", {
+                        ...config.tgfs.sftp,
+                        enabled: e.target.checked,
+                      })
+                    }
+                  />
+                }
+              />
+              {config.tgfs.sftp.enabled && (
+                <>
+                  <FieldRow>
+                    <ConfigTextField
+                      label="Host"
+                      value={config.tgfs.sftp.host}
+                      onChange={(e) =>
+                        updateConfig("tgfs.sftp", {
+                          ...config.tgfs.sftp,
+                          host: e.target.value,
+                        })
+                      }
+                      width={200}
+                    />
+                    <ConfigTextField
+                      label="Port"
+                      type="number"
+                      value={config.tgfs.sftp.port}
+                      onChange={(e) =>
+                        updateConfig("tgfs.sftp", {
+                          ...config.tgfs.sftp,
+                          port: parseInt(e.target.value),
+                        })
+                      }
+                      width={120}
+                    />
+                  </FieldRow>
+                  <Typography variant="body2" color="text.secondary">
+                    Connect with{" "}
+                    <code>
+                      sftp -P {config.tgfs.sftp.port} &lt;user&gt;@
+                      {config.tgfs.sftp.host}
+                    </code>
+                  </Typography>
+                  <FieldRow>
+                    <ConfigTextField
+                      label="Host Key File"
+                      value={config.tgfs.sftp.host_key_file}
+                      onChange={(e) =>
+                        updateConfig("tgfs.sftp", {
+                          ...config.tgfs.sftp,
+                          host_key_file: e.target.value,
+                        })
+                      }
+                      width={280}
+                    />
+                    <ConfigTextField
+                      label="Upload Buffer (MB)"
+                      type="number"
+                      value={config.tgfs.sftp.upload_buffer_size_mb}
+                      onChange={(e) =>
+                        updateConfig("tgfs.sftp", {
+                          ...config.tgfs.sftp,
+                          upload_buffer_size_mb: parseInt(e.target.value),
+                        })
+                      }
+                      width={180}
+                    />
+                  </FieldRow>
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                    sx={{ mb: 1 }}
+                  >
+                    The host key is generated on first start and must be backed
+                    up — a new one on every restart makes clients refuse to
+                    connect. SFTP never announces an upload&apos;s size, so a
+                    file is buffered in memory up to the size above and spills
+                    to disk beyond it.
+                  </Typography>
+                  <ConfigTextField
+                    label="Authorized Keys Directory (optional)"
+                    value={config.tgfs.sftp.authorized_keys_dir}
+                    onChange={(e) =>
+                      updateConfig("tgfs.sftp", {
+                        ...config.tgfs.sftp,
+                        authorized_keys_dir: e.target.value,
+                      })
+                    }
+                    width={360}
+                  />
+                  <Typography variant="body2" color="text.secondary">
+                    Leave empty for password login only. Otherwise put one file
+                    per user in that directory, named after the username, in
+                    the usual <code>authorized_keys</code> format. The user
+                    still has to be listed above so the readonly flag applies.
+                  </Typography>
+                </>
+              )}
             </FormSection>
 
             <FormSection title="Redundancy (Optional)">
