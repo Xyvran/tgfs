@@ -260,23 +260,21 @@ class TestMessageApi:
         # Assert
         assert result == []
 
-    def test_split_download_tasks(self):
-        # Test splitting into 3 chunks
-        tasks = list(MessageApi.split_download_tasks(0, 299, 3))
+    def test_split_download_pieces(self):
+        pieces = list(MessageApi.split_download_pieces(0, 299, 100))
 
-        assert len(tasks) == 3
-        assert tasks[0] == (0, 99)
-        assert tasks[1] == (100, 199)
-        assert tasks[2] == (200, 299)
+        assert pieces == [(0, 99), (100, 199), (200, 299)]
 
-    def test_split_download_tasks_uneven(self):
-        # Test splitting uneven range
-        tasks = list(MessageApi.split_download_tasks(0, 10, 3))
+    def test_split_download_pieces_uneven(self):
+        """The last piece is short; it is never padded past ``end``."""
+        pieces = list(MessageApi.split_download_pieces(0, 10, 4))
 
-        assert len(tasks) == 3
-        assert tasks[0] == (0, 2)
-        assert tasks[1] == (3, 5)
-        assert tasks[2] == (6, 10)
+        assert pieces == [(0, 3), (4, 7), (8, 10)]
+
+    def test_split_download_pieces_shorter_than_one_piece(self):
+        pieces = list(MessageApi.split_download_pieces(10, 19, 4096))
+
+        assert pieces == [(10, 19)]
 
     def test_size_calculation(self):
         # _size counts the bytes of an inclusive range
@@ -311,46 +309,72 @@ class TestMessageApi:
         assert call_args.end == 99
         assert result == mock_response
 
+    @staticmethod
+    def _serve_ranges(mock_tdlib):
+        """Answer each download_file call with the bytes of its own range."""
+        requested = []
+
+        async def download(req: DownloadFileReq) -> DownloadFileResp:
+            requested.append((req.begin, req.end))
+            payload = bytes([req.begin % 251]) * (req.end - req.begin + 1)
+
+            async def chunks():
+                yield payload
+
+            return DownloadFileResp(chunks=chunks(), size=len(payload))
+
+        mock_tdlib.next_bot.download_file = AsyncMock(side_effect=download)
+        return requested
+
     @pytest.mark.asyncio
     async def test_download_file_parallel(self, message_api, mock_tdlib, mocker):
-        # Setup - mock is_big_file to return True
+        """A big range is fetched piece by piece and delivered in order."""
         mocker.patch("tgfs.core.api.message.is_big_file", return_value=True)
+        mocker.patch("tgfs.core.api.message.DOWNLOAD_PIECE_SIZE", 1024)
+        requested = self._serve_ranges(mock_tdlib)
 
-        # Mock download responses - these need to be returned by the AsyncMock
-        mock_response1 = Mock(spec=DownloadFileResp, chunks=AsyncMock(), size=50)
-        mock_response2 = Mock(spec=DownloadFileResp, chunks=AsyncMock(), size=50)
+        result = await message_api.download_file(12345, 0, 4095)
+        received = b"".join([chunk async for chunk in result.chunks])
 
-        # Create a side_effect function that returns the responses in order
-        responses = [mock_response1, mock_response2]
-        mock_tdlib.next_bot.download_file.side_effect = responses
-
-        # A range wide enough that both bots get a segment of their own
-        end = 4 * 1024 * 1024 - 1
-
-        # Execute
-        result = await message_api.download_file(12345, 0, end)
-
-        # Assert
-        assert mock_tdlib.next_bot.download_file.call_count == 2
-        assert isinstance(result, DownloadFileResp)
-        assert result.size == end + 1
-
-    @pytest.mark.asyncio
-    async def test_download_file_parallel_caps_segments_for_short_ranges(
-        self, message_api, mock_tdlib, mocker
-    ):
-        """A range too short to fill one segment per bot stays in one piece.
-
-        Splitting further would hand some bots an empty (end < begin) range.
-        """
-        mocker.patch("tgfs.core.api.message.is_big_file", return_value=True)
-        mock_tdlib.next_bot.download_file.return_value = Mock(
-            spec=DownloadFileResp, chunks=AsyncMock(), size=100
+        assert requested == [(0, 1023), (1024, 2047), (2048, 3071), (3072, 4095)]
+        assert result.size == 4096
+        assert received == b"".join(
+            bytes([begin % 251]) * 1024 for begin, _ in requested
         )
 
-        await message_api.download_file(12345, 0, 99)
+    @pytest.mark.asyncio
+    async def test_download_file_parallel_starts_pieces_lazily(
+        self, message_api, mock_tdlib, mocker
+    ):
+        """Pieces beyond the window must not be requested up front.
 
-        assert mock_tdlib.next_bot.download_file.call_count == 1
+        A multi-gigabyte range is hundreds of pieces; issuing them all at
+        once would replace one slow download with a burst of requests.
+        """
+        mocker.patch("tgfs.core.api.message.is_big_file", return_value=True)
+        mocker.patch("tgfs.core.api.message.DOWNLOAD_PIECE_SIZE", 1024)
+        mocker.patch("tgfs.core.api.message.DOWNLOAD_PIECE_CONCURRENCY", 2)
+        requested = self._serve_ranges(mock_tdlib)
+
+        result = await message_api.download_file(12345, 0, 1024 * 20 - 1)
+        await result.chunks.__anext__()
+        await asyncio.sleep(0)
+
+        assert len(requested) <= 4
+        await result.chunks.aclose()
+
+    @pytest.mark.asyncio
+    async def test_download_file_parallel_short_range_is_a_single_piece(
+        self, message_api, mock_tdlib, mocker
+    ):
+        mocker.patch("tgfs.core.api.message.is_big_file", return_value=True)
+        requested = self._serve_ranges(mock_tdlib)
+
+        result = await message_api.download_file(12345, 0, 99)
+        async for _ in result.chunks:
+            pass
+
+        assert requested == [(0, 99)]
 
     @pytest.fixture
     def patch_delete_flag(self, mocker):

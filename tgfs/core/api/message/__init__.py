@@ -1,6 +1,5 @@
-import asyncio
 import logging
-from typing import Iterable, Iterator, List
+from typing import AsyncIterator, Iterable, Iterator, List
 
 from pyrate_limiter import Duration, InMemoryBucket, Limiter, Rate
 from telethon.errors import MessageNotModifiedError, RPCError
@@ -27,8 +26,8 @@ from tgfs.reqres import (
     SendTextReq,
 )
 from tgfs.telegram.interface import TDLibApi
-from tgfs.utils.chained_async_iterator import ChainedAsyncIterator
 from tgfs.utils.others import exclude_none, is_big_file
+from tgfs.utils.prefetching_chain import prefetching_chain
 
 from .message_broker import MessageBroker
 
@@ -37,9 +36,19 @@ logger = logging.getLogger(__name__)
 # Telegram's messages.deleteMessages caps each request at 100 message ids.
 DELETE_BATCH_SIZE = 100
 
-# Smallest sub-range a parallel download is split into. Below this the extra
-# round trips outweigh the parallelism.
-MIN_PARALLEL_SEGMENT = 1024 * 1024
+# A split download is cut into fixed-size pieces rather than one huge slice
+# per bot. Output has to stay in order, so a piece that finishes early has to
+# be held until its turn comes -- with slice-per-bot that means buffering
+# gigabytes, while with small pieces the buffer is bounded by
+# ``piece size x pieces in flight``. Small enough to keep that bound cheap,
+# large enough that the per-piece round trip does not dominate.
+DOWNLOAD_PIECE_SIZE = 4 * 1024 * 1024
+
+# How many pieces are fetched at once. Pieces are handed to bots round-robin,
+# so this is also how many bot connections a single download can occupy.
+# Peak buffering per download is ``concurrency x piece size`` -- 16 MiB at
+# these defaults.
+DOWNLOAD_PIECE_CONCURRENCY = 4
 
 rate = Rate(20, Duration.SECOND)
 bucket = InMemoryBucket([rate])
@@ -225,55 +234,67 @@ class MessageApi(MessageBroker):
             )
         return []
 
-    @classmethod
-    def split_download_tasks(
-        cls, begin: int, end: int, n: int
+    @staticmethod
+    def split_download_pieces(
+        begin: int, end: int, piece_size: int
     ) -> Iterator[tuple[int, int]]:
-        length = end - begin + 1
-        length_per_chunk = length // n
-
-        for i in range(n - 1):
-            b = begin + i * length_per_chunk
-            e = b + length_per_chunk - 1
-            yield b, e
-
-        yield begin + (n - 1) * length_per_chunk, end
+        """Cut the inclusive range ``[begin, end]`` into pieces."""
+        for piece_begin in range(begin, end + 1, piece_size):
+            yield piece_begin, min(piece_begin + piece_size - 1, end)
 
     @staticmethod
     def _size(begin: int, end: int) -> int:
         """Number of bytes in the inclusive range ``[begin, end]``."""
         return end - begin + 1
 
-    def _parallel_segments(self, begin: int, end: int) -> int:
-        """How many sub-ranges to split ``[begin, end]`` into.
+    def _download_piece(
+        self, message_id: int, begin: int, end: int
+    ) -> AsyncIterator[bytes]:
+        """One piece of a split download.
 
-        Capped so that no segment falls below ``MIN_PARALLEL_SEGMENT``:
-        splitting a range into pieces smaller than a single download chunk
-        costs more round trips than it saves, and a range shorter than the
-        number of bots would even produce empty (end < begin) segments.
+        A generator, so the request is issued when the piece is actually
+        started. Building them eagerly would fire one call per piece up
+        front -- hundreds of them for a large file.
         """
-        length = self._size(begin, end)
-        return max(1, min(len(self.tdlib.bots), length // MIN_PARALLEL_SEGMENT))
 
-    async def download_file_parallel(self, message_id: int, begin: int, end: int):
-        tasks = [
-            self.tdlib.next_bot.download_file(
+        async def piece() -> AsyncIterator[bytes]:
+            resp = await self.tdlib.next_bot.download_file(
                 DownloadFileReq(
                     chat=self.private_file_channel,
                     message_id=message_id,
                     chunk_size=get_config().tgfs.download.chunk_size_kb,
-                    begin=b,
-                    end=e,
+                    begin=begin,
+                    end=end,
                 )
             )
-            for b, e in self.split_download_tasks(
-                begin, end, self._parallel_segments(begin, end)
+            async for chunk in resp.chunks:
+                yield chunk
+
+        return piece()
+
+    async def download_file_parallel(
+        self, message_id: int, begin: int, end: int
+    ) -> DownloadFileResp:
+        chunk_bytes = get_config().tgfs.download.chunk_size_kb * 1024
+        pieces = [
+            self._download_piece(message_id, piece_begin, piece_end)
+            for piece_begin, piece_end in self.split_download_pieces(
+                begin, end, DOWNLOAD_PIECE_SIZE
             )
         ]
 
-        res = [t.chunks for t in await asyncio.gather(*tasks)]
+        # A piece has to fit in its queue, otherwise a piece that is ready
+        # early blocks instead of freeing its bot for the next one -- which
+        # is what would keep the download sequential in all but name.
+        queue_depth = max(1, -(-DOWNLOAD_PIECE_SIZE // max(1, chunk_bytes)))
+
         return DownloadFileResp(
-            chunks=ChainedAsyncIterator(res), size=self._size(begin, end)
+            chunks=prefetching_chain(
+                pieces,
+                concurrency=DOWNLOAD_PIECE_CONCURRENCY,
+                queue_depth=queue_depth,
+            ),
+            size=self._size(begin, end),
         )
 
     async def download_file(

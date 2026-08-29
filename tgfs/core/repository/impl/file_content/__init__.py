@@ -14,7 +14,7 @@ from tgfs.reqres import (
     SentFileMessage,
     UploadableFileMessage,
 )
-from tgfs.utils.chained_async_iterator import ChainedAsyncIterator
+from tgfs.utils.prefetching_chain import prefetching_chain
 
 from .file_uploader import FileUploader
 
@@ -27,6 +27,11 @@ PART_SIZE_DEFAULT = (
 PART_SIZE_PREMIUM = (
     512 * 1024 * 8000
 )  # 4 GB, max size of a single file message in Telegram Premium
+
+# How many 2 GB parts of one file are fetched at a time. Each part may
+# itself be split across bots, so this multiplies with the per-message
+# concurrency -- keep it small.
+PART_PREFETCH_CONCURRENCY = 2
 
 
 class TGMsgFileContentRepository(IFileContentRepository):
@@ -264,4 +269,4 @@ class TGMsgFileContentRepository(IFileContentRepository):
                 self._get_file_parts_indexed(fv, begin, end)
             )
         ]
-        return ChainedAsyncIterator(parts)
+        return prefetching_chain(parts, concurrency=PART_PREFETCH_CONCURRENCY)

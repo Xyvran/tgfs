@@ -343,15 +343,10 @@ class TestGetMethod:
             part_sizes=[],
         )
 
-        mock_chained = mocker.patch(
-            "tgfs.core.repository.impl.file_content.ChainedAsyncIterator"
-        )
+        result = await repository.get(empty_version, 0, -1, "empty.txt")
 
-        await repository.get(empty_version, 0, -1, "empty.txt")
-
+        assert [chunk async for chunk in result] == []
         mock_message_api.download_file.assert_not_called()
-        # Just check that ChainedAsyncIterator was called, the argument is a generator expression
-        mock_chained.assert_called_once()
 
 
 class TestUpdateMethod:
