@@ -8,6 +8,7 @@ from tgfs.config import (
     ServerConfig,
     SFTPConfig,
     TGFSConfig,
+    TransferConfig,
     Config,
     GithubRepoConfig,
     MetadataConfig,
@@ -200,6 +201,68 @@ class TestSFTPConfig:
     def test_rejects_negative_buffer_size(self):
         with pytest.raises(ValueError):
             SFTPConfig.from_dict({"upload_buffer_size_mb": -1})
+
+
+class TestTransferConfig:
+    def test_defaults_when_absent(self):
+        """An existing config.yaml has no transfer block and must still load."""
+        config = TGFSConfig.from_dict(
+            {
+                "users": {},
+                "download": {"chunk_size_kb": 512},
+                "jwt": {"secret": "test", "algorithm": "HS256", "life": 1800},
+                "server": {"host": "localhost", "port": 3000},
+            }
+        )
+
+        assert config.transfer.upload_workers_small == 3
+        assert config.transfer.upload_workers_big == 8
+        assert config.transfer.upload_part_size_kb == 512
+        assert config.transfer.download_pieces_in_flight == 4
+        assert config.transfer.connection_pool_size == 1
+        assert config.transfer.chunk_cache_mb == 0
+
+    def test_overrides(self):
+        config = TransferConfig.from_dict(
+            {
+                "upload_workers_big": 12,
+                "upload_part_size_kb": 256,
+                "download_piece_size_kb": 8192,
+                "download_pieces_in_flight": 6,
+                "parallel_download_threshold_mb": 32,
+                "connection_pool_size": 4,
+                "chunk_cache_mb": 128,
+                "chunk_cache_readahead": 3,
+            }
+        )
+
+        assert config.upload_workers_big == 12
+        assert config.upload_part_size_bytes == 256 * 1024
+        assert config.download_piece_size_bytes == 8192 * 1024
+        assert config.parallel_download_threshold_bytes == 32 * 1024 * 1024
+        assert config.chunk_cache_bytes == 128 * 1024 * 1024
+
+    @pytest.mark.parametrize(
+        "part_size", [700, 300, 1024]
+    )
+    def test_rejects_part_sizes_telegram_would_refuse(self, part_size):
+        """Telegram only accepts part sizes that divide 512 KiB."""
+        with pytest.raises(ValueError, match="upload_part_size_kb"):
+            TransferConfig.from_dict({"upload_part_size_kb": part_size})
+
+    @pytest.mark.parametrize(
+        "key", ["upload_workers_big", "download_pieces_in_flight", "connection_pool_size"]
+    )
+    def test_rejects_non_positive_counts(self, key):
+        with pytest.raises(ValueError, match=key):
+            TransferConfig.from_dict({key: 0})
+
+    def test_rejects_a_negative_cache_budget(self):
+        with pytest.raises(ValueError, match="chunk_cache_mb"):
+            TransferConfig.from_dict({"chunk_cache_mb": -1})
+
+    def test_a_disabled_cache_is_allowed(self):
+        assert TransferConfig.from_dict({"chunk_cache_mb": 0}).chunk_cache_mb == 0
 
 
 class TestGithubRepoConfig:

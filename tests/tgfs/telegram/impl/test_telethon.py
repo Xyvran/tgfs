@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -12,7 +12,9 @@ from tgfs.telegram.impl.telethon import (
     Session,
     login_as_account,
     login_as_bots,
+    open_extra_connections,
 )
+from tgfs.config import TransferConfig
 from tgfs.config import Config, TelegramConfig, BotConfig, AccountConfig
 from tgfs.errors import TechnicalError, UnDownloadableMessage
 from tgfs.utils.message_cache import global_message_cache
@@ -1097,3 +1099,134 @@ class TestLoginAsBots:
             "logged in as bot, but no username found"
         )
         assert result[0] == mock_client
+
+
+class TestConnectionPool:
+    """A session may hold several connections; only bulk calls spread out."""
+
+    @pytest.fixture
+    def connections(self, mocker):
+        return [mocker.AsyncMock(spec=TelegramClient) for _ in range(3)]
+
+    @pytest.fixture
+    def pooled_api(self, connections) -> TelethonAPI:
+        return TelethonAPI(connections[0], connections[1:])
+
+    @pytest.mark.asyncio
+    async def test_file_parts_are_spread_over_every_connection(
+        self, pooled_api, connections
+    ):
+        for part in range(6):
+            await pooled_api.save_file_part(
+                SaveFilePartReq(file_id=1, file_part=part, bytes=b"x")
+            )
+
+        assert [c.call_count for c in connections] == [2, 2, 2]
+
+    @pytest.mark.asyncio
+    async def test_big_file_parts_are_spread_too(self, pooled_api, connections):
+        for part in range(3):
+            await pooled_api.save_big_file_part(
+                SaveBigFilePartReq(
+                    file_id=1, file_part=part, bytes=b"x", file_total_parts=3
+                )
+            )
+
+        assert [c.call_count for c in connections] == [1, 1, 1]
+
+    @pytest.mark.asyncio
+    async def test_metadata_calls_stay_on_the_primary_connection(
+        self, pooled_api, connections
+    ):
+        """Only the data path is pooled; the rest keeps one connection."""
+        await pooled_api.send_text(SendTextReq(chat=1, text="hello"))
+        await pooled_api.send_text(SendTextReq(chat=1, text="again"))
+
+        assert connections[0].send_message.call_count == 2
+        assert connections[1].send_message.call_count == 0
+        assert connections[2].send_message.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_single_connection_is_used_for_everything(self, mocker):
+        client = mocker.AsyncMock(spec=TelegramClient)
+        api = TelethonAPI(client)
+
+        for part in range(3):
+            await api.save_file_part(
+                SaveFilePartReq(file_id=1, file_part=part, bytes=b"x")
+            )
+
+        assert client.call_count == 3
+
+
+class TestOpenExtraConnections:
+    @pytest.fixture
+    def config(self):
+        return Config(
+            telegram=TelegramConfig(
+                api_id=123,
+                api_hash="hash",
+                account=None,
+                bot=BotConfig(token="t", tokens=["t"], session_file="s"),
+                private_file_channel=["1"],
+                lib="telethon",
+                delete_messages_on_remove=False,
+                redundancy=None,
+            ),
+            tgfs=Mock(),
+        )
+
+    @staticmethod
+    def _pool_size(mocker, size: int):
+        cfg = Mock()
+        cfg.tgfs.transfer = TransferConfig.from_dict({"connection_pool_size": size})
+        mocker.patch("tgfs.telegram.impl.telethon.get_config", return_value=cfg)
+
+    @pytest.mark.asyncio
+    async def test_a_pool_of_one_opens_nothing(self, mocker, config):
+        self._pool_size(mocker, 1)
+        client = mocker.AsyncMock(spec=TelegramClient)
+
+        assert await open_extra_connections(config, client) == []
+
+    @pytest.mark.asyncio
+    async def test_the_remaining_connections_are_opened(self, mocker, config):
+        self._pool_size(mocker, 4)
+        client = mocker.MagicMock()
+        client.session.save.return_value = "session-string"
+        mocker.patch("tgfs.telegram.impl.telethon.StringSession")
+        built = mocker.patch(
+            "tgfs.telegram.impl.telethon.TelegramClient",
+            side_effect=lambda *_a, **_kw: mocker.AsyncMock(spec=TelegramClient),
+        )
+
+        extra = await open_extra_connections(config, client)
+
+        # Three more on top of the one the caller already holds
+        assert len(extra) == 3
+        assert built.call_count == 3
+        for connection in extra:
+            connection.connect.assert_awaited_once()  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_a_connection_that_fails_is_not_fatal(self, mocker, config):
+        """Fewer connections is a slower transfer, not a broken one."""
+        self._pool_size(mocker, 4)
+        client = mocker.MagicMock()
+        client.session.save.return_value = "session-string"
+        mocker.patch("tgfs.telegram.impl.telethon.StringSession")
+
+        opened: list = []
+
+        def build(*_args, **_kwargs):
+            connection = mocker.AsyncMock(spec=TelegramClient)
+            if len(opened) == 1:
+                connection.connect.side_effect = OSError("no route to host")
+            opened.append(connection)
+            return connection
+
+        mocker.patch("tgfs.telegram.impl.telethon.TelegramClient", side_effect=build)
+
+        extra = await open_extra_connections(config, client)
+
+        assert len(extra) == 1

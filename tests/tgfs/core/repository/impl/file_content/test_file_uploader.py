@@ -34,7 +34,7 @@ class TestWorkersConfig:
     def test_default_values(self):
         config = WorkersConfig()
         assert config.small == 3
-        assert config.big == 5
+        assert config.big == 8
 
     def test_custom_values(self):
         config = WorkersConfig(small=2, big=8)
@@ -432,8 +432,8 @@ class TestConcurrencyAndWorkers:
     @pytest.mark.asyncio
     async def test_concurrent_uploads(self, mock_client):
         """Test that multiple parts can be uploaded concurrently"""
-        # Use a larger file to ensure multiple parts
-        test_data = b"x" * (1024 * 512)  # 512KB
+        # Comfortably more than one 512 KiB part
+        test_data = b"x" * (1024 * 1024 * 2)  # 2 MiB
 
         file_msg = FileMessageFromBuffer.new(buffer=test_data, name="large.txt")
 

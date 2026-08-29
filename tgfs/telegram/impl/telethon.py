@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from itertools import cycle
 from typing import List, Optional, Sequence
 
 from telethon import TelegramClient
@@ -11,7 +12,7 @@ from telethon.helpers import TotalList
 from telethon.sessions import StringSession
 from telethon.tl.types import InputDocumentFileLocation, PeerChannel
 
-from tgfs.config import Config
+from tgfs.config import Config, get_config
 from tgfs.errors import TechnicalError, UnDownloadableMessage
 from tgfs.reqres import (
     DeleteMessagesReq,
@@ -45,9 +46,23 @@ logger = logging.getLogger(__name__)
 
 
 class TelethonAPI(ITDLibClient):
-    def __init__(self, client: TelegramClient):
+    def __init__(
+        self,
+        client: TelegramClient,
+        extra_connections: Sequence[TelegramClient] = (),
+    ):
         super().__init__()
         self._client = client
+        # One MTProto connection carries its requests one after another, so
+        # the file-part calls -- and only those -- are spread over every
+        # connection this session has. Metadata calls stay on the primary
+        # one, where the message cache and the session state live.
+        self._transfer_clients: List[TelegramClient] = [client, *extra_connections]
+        self.__transfer_cycle = cycle(self._transfer_clients)
+
+    @property
+    def _transfer_client(self) -> TelegramClient:
+        return next(self.__transfer_cycle)
 
     async def __get_messages(self, *args, **kwargs) -> Sequence[tlt.Message]:
         messages = await self._client.get_messages(*args, **kwargs)
@@ -165,7 +180,7 @@ class TelethonAPI(ITDLibClient):
         )
 
     async def save_big_file_part(self, req: SaveBigFilePartReq) -> SaveFilePartResp:
-        success = await self._client(
+        success = await self._transfer_client(
             tlf.upload.SaveBigFilePartRequest(
                 file_id=req.file_id,
                 file_part=req.file_part,
@@ -176,7 +191,7 @@ class TelethonAPI(ITDLibClient):
         return SaveFilePartResp(success=success)
 
     async def save_file_part(self, req: SaveFilePartReq) -> SaveFilePartResp:
-        success = await self._client(
+        success = await self._transfer_client(
             tlf.upload.SaveFilePartRequest(
                 file_id=req.file_id,
                 file_part=req.file_part,
@@ -281,7 +296,7 @@ class TelethonAPI(ITDLibClient):
 
             while rest > 0:
                 try:
-                    async for chunk in self._client.iter_download(
+                    async for chunk in self._transfer_client.iter_download(
                         file=InputDocumentFileLocation(
                             id=doc.id,
                             access_hash=doc.access_hash,
@@ -372,6 +387,42 @@ class Session:
             os.makedirs(dir_, exist_ok=True)
         with open(self.session_file, "w") as f:
             f.write(session_string)
+
+
+async def open_extra_connections(
+    config: Config, client: TelegramClient
+) -> List[TelegramClient]:
+    """Open the additional connections ``connection_pool_size`` asks for.
+
+    Telegram accepts several simultaneous connections per authorization,
+    and a single connection sends its requests one at a time -- so this is
+    what lets one bot transfer more than one part at a time. A connection
+    that cannot be opened is not fatal: the session simply keeps the ones
+    it got, which is the same behaviour as a pool size of one.
+    """
+    extra = get_config().tgfs.transfer.connection_pool_size - 1
+    if extra < 1:
+        return []
+
+    session_string = client.session.save()  # type: ignore[attr-defined]
+    connections: List[TelegramClient] = []
+    for i in range(extra):
+        try:
+            connection = TelegramClient(
+                StringSession(session_string), config.telegram.api_id, config.telegram.api_hash
+            )
+            await connection.connect()
+            connections.append(connection)
+        except Exception as ex:
+            logger.warning(
+                f"Could not open connection {i + 2} of {extra + 1} for this "
+                f"session ({ex}); continuing with {len(connections) + 1}"
+            )
+            break
+
+    if connections:
+        logger.info(f"Opened {len(connections) + 1} connections for this session")
+    return connections
 
 
 async def login_as_account(config: Config) -> TelegramClient:

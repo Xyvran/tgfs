@@ -5,6 +5,7 @@ import asyncio
 import telethon.types as tlt
 from telethon.errors import MessageNotModifiedError, RPCError
 
+from tgfs.config import TransferConfig
 from tgfs.core.api.message import MessageApi
 from tgfs.errors import (
     MessageNotFound,
@@ -290,8 +291,7 @@ class TestMessageApi:
         mock_private_channel,
         mocker,
     ):
-        # Setup - mock is_big_file to return False
-        mocker.patch("tgfs.core.api.message.is_big_file", return_value=False)
+        # A range far below the threshold is fetched in one go
         mock_response = Mock(spec=DownloadFileResp, chunks=AsyncMock(), size=100)
         mock_tdlib.next_bot.download_file.return_value = mock_response
 
@@ -308,6 +308,15 @@ class TestMessageApi:
         assert call_args.begin == 0
         assert call_args.end == 99
         assert result == mock_response
+
+    @staticmethod
+    def _transfer_settings(mocker, **overrides) -> TransferConfig:
+        """Point the download tunables at test-sized values."""
+        settings = TransferConfig.from_dict(
+            {"parallel_download_threshold_mb": 1, **overrides}
+        )
+        mocker.patch("tgfs.core.api.message._transfer", return_value=settings)
+        return settings
 
     @staticmethod
     def _serve_ranges(mock_tdlib):
@@ -329,17 +338,22 @@ class TestMessageApi:
     @pytest.mark.asyncio
     async def test_download_file_parallel(self, message_api, mock_tdlib, mocker):
         """A big range is fetched piece by piece and delivered in order."""
-        mocker.patch("tgfs.core.api.message.is_big_file", return_value=True)
-        mocker.patch("tgfs.core.api.message.DOWNLOAD_PIECE_SIZE", 1024)
+        piece = 1024 * 1024
+        self._transfer_settings(mocker, download_piece_size_kb=1024)
         requested = self._serve_ranges(mock_tdlib)
 
-        result = await message_api.download_file(12345, 0, 4095)
+        result = await message_api.download_file(12345, 0, 4 * piece - 1)
         received = b"".join([chunk async for chunk in result.chunks])
 
-        assert requested == [(0, 1023), (1024, 2047), (2048, 3071), (3072, 4095)]
-        assert result.size == 4096
+        assert requested == [
+            (0, piece - 1),
+            (piece, 2 * piece - 1),
+            (2 * piece, 3 * piece - 1),
+            (3 * piece, 4 * piece - 1),
+        ]
+        assert result.size == 4 * piece
         assert received == b"".join(
-            bytes([begin % 251]) * 1024 for begin, _ in requested
+            bytes([begin % 251]) * piece for begin, _ in requested
         )
 
     @pytest.mark.asyncio
@@ -351,12 +365,12 @@ class TestMessageApi:
         A multi-gigabyte range is hundreds of pieces; issuing them all at
         once would replace one slow download with a burst of requests.
         """
-        mocker.patch("tgfs.core.api.message.is_big_file", return_value=True)
-        mocker.patch("tgfs.core.api.message.DOWNLOAD_PIECE_SIZE", 1024)
-        mocker.patch("tgfs.core.api.message.DOWNLOAD_PIECE_CONCURRENCY", 2)
+        self._transfer_settings(
+            mocker, download_piece_size_kb=1024, download_pieces_in_flight=2
+        )
         requested = self._serve_ranges(mock_tdlib)
 
-        result = await message_api.download_file(12345, 0, 1024 * 20 - 1)
+        result = await message_api.download_file(12345, 0, 20 * 1024 * 1024 - 1)
         await result.chunks.__anext__()
         await asyncio.sleep(0)
 
@@ -367,14 +381,16 @@ class TestMessageApi:
     async def test_download_file_parallel_short_range_is_a_single_piece(
         self, message_api, mock_tdlib, mocker
     ):
-        mocker.patch("tgfs.core.api.message.is_big_file", return_value=True)
+        self._transfer_settings(mocker)
         requested = self._serve_ranges(mock_tdlib)
 
-        result = await message_api.download_file(12345, 0, 99)
+        # Past the threshold, but still shorter than a single piece
+        end = 2 * 1024 * 1024 - 1
+        result = await message_api.download_file(12345, 0, end)
         async for _ in result.chunks:
             pass
 
-        assert requested == [(0, 99)]
+        assert requested == [(0, end)]
 
     @pytest.fixture
     def patch_delete_flag(self, mocker):

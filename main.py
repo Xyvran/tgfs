@@ -33,14 +33,21 @@ async def create_clients(config: Config) -> Clients:
             bots=[PyrogramAPI(bot) for bot in await pyrogram.login_as_bots(config)],
         )
     else:
-        tdlib_api = TDLibApi(
-            account=(
-                TelethonAPI(await telethon.login_as_account(config))
-                if config.telegram.account
-                else None
-            ),
-            bots=[TelethonAPI(bot) for bot in await telethon.login_as_bots(config)],
-        )
+        account = None
+        if config.telegram.account:
+            account_client = await telethon.login_as_account(config)
+            account = TelethonAPI(
+                account_client,
+                await telethon.open_extra_connections(config, account_client),
+            )
+
+        bots = []
+        for bot in await telethon.login_as_bots(config):
+            bots.append(
+                TelethonAPI(bot, await telethon.open_extra_connections(config, bot))
+            )
+
+        tdlib_api = TDLibApi(account=account, bots=bots)
 
     clients: Clients = {}
 

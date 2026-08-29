@@ -4,7 +4,7 @@ from typing import AsyncIterator, Iterable, Iterator, List
 from pyrate_limiter import Duration, InMemoryBucket, Limiter, Rate
 from telethon.errors import MessageNotModifiedError, RPCError
 
-from tgfs.config import get_config
+from tgfs.config import TransferConfig, get_config
 from tgfs.errors import (
     MessageNotFound,
     NoPinnedMessage,
@@ -26,29 +26,20 @@ from tgfs.reqres import (
     SendTextReq,
 )
 from tgfs.telegram.interface import TDLibApi
-from tgfs.utils.others import exclude_none, is_big_file
+from tgfs.utils.others import exclude_none
 from tgfs.utils.prefetching_chain import prefetching_chain
 
 from .message_broker import MessageBroker
 
 logger = logging.getLogger(__name__)
 
+
+def _transfer() -> TransferConfig:
+    return get_config().tgfs.transfer
+
 # Telegram's messages.deleteMessages caps each request at 100 message ids.
 DELETE_BATCH_SIZE = 100
 
-# A split download is cut into fixed-size pieces rather than one huge slice
-# per bot. Output has to stay in order, so a piece that finishes early has to
-# be held until its turn comes -- with slice-per-bot that means buffering
-# gigabytes, while with small pieces the buffer is bounded by
-# ``piece size x pieces in flight``. Small enough to keep that bound cheap,
-# large enough that the per-piece round trip does not dominate.
-DOWNLOAD_PIECE_SIZE = 4 * 1024 * 1024
-
-# How many pieces are fetched at once. Pieces are handed to bots round-robin,
-# so this is also how many bot connections a single download can occupy.
-# Peak buffering per download is ``concurrency x piece size`` -- 16 MiB at
-# these defaults.
-DOWNLOAD_PIECE_CONCURRENCY = 4
 
 rate = Rate(20, Duration.SECOND)
 bucket = InMemoryBucket([rate])
@@ -275,23 +266,26 @@ class MessageApi(MessageBroker):
     async def download_file_parallel(
         self, message_id: int, begin: int, end: int
     ) -> DownloadFileResp:
+        transfer = _transfer()
+        piece_size = transfer.download_piece_size_bytes
         chunk_bytes = get_config().tgfs.download.chunk_size_kb * 1024
+
         pieces = [
             self._download_piece(message_id, piece_begin, piece_end)
             for piece_begin, piece_end in self.split_download_pieces(
-                begin, end, DOWNLOAD_PIECE_SIZE
+                begin, end, piece_size
             )
         ]
 
         # A piece has to fit in its queue, otherwise a piece that is ready
         # early blocks instead of freeing its bot for the next one -- which
         # is what would keep the download sequential in all but name.
-        queue_depth = max(1, -(-DOWNLOAD_PIECE_SIZE // max(1, chunk_bytes)))
+        queue_depth = max(1, -(-piece_size // max(1, chunk_bytes)))
 
         return DownloadFileResp(
             chunks=prefetching_chain(
                 pieces,
-                concurrency=DOWNLOAD_PIECE_CONCURRENCY,
+                concurrency=transfer.download_pieces_in_flight,
                 queue_depth=queue_depth,
             ),
             size=self._size(begin, end),
@@ -315,7 +309,11 @@ class MessageApi(MessageBroker):
                 )
             )
 
-        if end > 0 and is_big_file(self._size(begin, end)):
+        if (
+            end > 0
+            and self._size(begin, end)
+            > _transfer().parallel_download_threshold_bytes
+        ):
             return await self.download_file_parallel(message_id, begin, end)
 
         return await self.tdlib.next_bot.download_file(

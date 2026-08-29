@@ -1,10 +1,11 @@
 import asyncio
 import logging
 from dataclasses import dataclass
+from typing import Optional
 
 from telethon.helpers import generate_random_long
-from telethon.utils import get_appropriated_part_size
 
+from tgfs.config import get_config
 from tgfs.errors import TechnicalError
 from tgfs.reqres import (
     SaveBigFilePartReq,
@@ -30,7 +31,14 @@ RETRY_MAX_DELAY = 30.0
 @dataclass
 class WorkersConfig:
     small: int = 3
-    big: int = 5
+    big: int = 8
+
+    @classmethod
+    def from_config(cls) -> "WorkersConfig":
+        transfer = get_config().tgfs.transfer
+        return cls(
+            small=transfer.upload_workers_small, big=transfer.upload_workers_big
+        )
 
 
 @dataclass
@@ -44,21 +52,24 @@ class FileUploader:
         self,
         client: ITDLibClient,
         file_msg: UploadableFileMessage,
-        workers=WorkersConfig(),
+        workers: Optional[WorkersConfig] = None,
     ):
         self.client = client
         self._file_msg = file_msg
         self._file_size = self._file_msg.get_size()
         self._file_name = self._file_msg.file_name()
 
-        self._chunk_size = get_appropriated_part_size(self._file_size) * 1024
+        # One part size for every file. The library's heuristic drops to
+        # 128 KiB below 100 MB, which quadruples the number of requests for
+        # no gain -- 512 KiB is accepted for any size.
+        self._chunk_size = get_config().tgfs.transfer.upload_part_size_bytes
         self._total_parts = (self._file_size + self._chunk_size - 1) // self._chunk_size
 
         self._part_indexes: asyncio.Queue[int] = asyncio.Queue(
             maxsize=self._total_parts
         )
 
-        self._workers = workers
+        self._workers = workers or WorkersConfig.from_config()
 
         self._file_id = generate_random_long()
 

@@ -294,6 +294,123 @@ class SFTPConfig:
 
 
 @dataclass
+class TransferConfig:
+    """Tuning knobs for moving file bytes to and from Telegram.
+
+    Every value here used to be a constant in the code. The right setting
+    depends on how many bots a deployment has, how much bandwidth it can
+    use and how tolerant its account is of Telegram's rate limits, so none
+    of them has a single good answer.
+
+    Downloads are split into pieces of ``download_piece_size_kb`` and
+    ``download_pieces_in_flight`` of them are fetched at once. Output must
+    stay in order, so a finished piece waits for its turn: peak buffering
+    per download is the product of the two -- 16 MiB at the defaults.
+    Raising either speeds up a single large download and costs memory per
+    concurrent reader.
+
+    ``connection_pool_size`` is how many MTProto connections each bot
+    opens. One connection serialises its requests, so a deployment with a
+    single bot token gains the most here; with several bots the pieces
+    already spread across them.
+
+    ``chunk_cache_mb`` is the memory budget for caching downloaded bytes;
+    ``0`` disables the cache.
+    """
+
+    upload_workers_small: int
+    upload_workers_big: int
+    upload_part_size_kb: int
+    download_piece_size_kb: int
+    download_pieces_in_flight: int
+    parallel_download_threshold_mb: int
+    connection_pool_size: int
+    chunk_cache_mb: int
+    chunk_cache_readahead: int
+
+    DEFAULT_UPLOAD_WORKERS_SMALL = 3
+    DEFAULT_UPLOAD_WORKERS_BIG = 8
+    # 512 KiB is the largest part Telegram accepts and is valid for any file
+    # size, so there is no reason to send the smaller parts the library
+    # would otherwise pick for files below 750 MB.
+    DEFAULT_UPLOAD_PART_SIZE_KB = 512
+    DEFAULT_DOWNLOAD_PIECE_SIZE_KB = 4096
+    DEFAULT_DOWNLOAD_PIECES_IN_FLIGHT = 4
+    DEFAULT_PARALLEL_DOWNLOAD_THRESHOLD_MB = 10
+    DEFAULT_CONNECTION_POOL_SIZE = 1
+    DEFAULT_CHUNK_CACHE_MB = 0
+    DEFAULT_CHUNK_CACHE_READAHEAD = 2
+
+    @property
+    def download_piece_size_bytes(self) -> int:
+        return self.download_piece_size_kb * 1024
+
+    @property
+    def upload_part_size_bytes(self) -> int:
+        return self.upload_part_size_kb * 1024
+
+    @property
+    def parallel_download_threshold_bytes(self) -> int:
+        return self.parallel_download_threshold_mb * 1024 * 1024
+
+    @property
+    def chunk_cache_bytes(self) -> int:
+        return self.chunk_cache_mb * 1024 * 1024
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict]) -> "TransferConfig":
+        data = data or {}
+
+        def positive(key: str, default: int) -> int:
+            value = int(data.get(key, default))
+            if value < 1:
+                raise ValueError(f"transfer.{key} must be at least 1, got {value}")
+            return value
+
+        def non_negative(key: str, default: int) -> int:
+            value = int(data.get(key, default))
+            if value < 0:
+                raise ValueError(f"transfer.{key} must not be negative, got {value}")
+            return value
+
+        part_size = positive("upload_part_size_kb", cls.DEFAULT_UPLOAD_PART_SIZE_KB)
+        # Telegram only accepts part sizes that divide 512 KiB, and it caps
+        # them there; anything else is rejected for every part of the file.
+        if part_size > 512 or 512 % part_size != 0:
+            raise ValueError(
+                "transfer.upload_part_size_kb must divide 512 and not exceed it, "
+                f"got {part_size}"
+            )
+
+        return cls(
+            upload_workers_small=positive(
+                "upload_workers_small", cls.DEFAULT_UPLOAD_WORKERS_SMALL
+            ),
+            upload_workers_big=positive(
+                "upload_workers_big", cls.DEFAULT_UPLOAD_WORKERS_BIG
+            ),
+            upload_part_size_kb=part_size,
+            download_piece_size_kb=positive(
+                "download_piece_size_kb", cls.DEFAULT_DOWNLOAD_PIECE_SIZE_KB
+            ),
+            download_pieces_in_flight=positive(
+                "download_pieces_in_flight", cls.DEFAULT_DOWNLOAD_PIECES_IN_FLIGHT
+            ),
+            parallel_download_threshold_mb=positive(
+                "parallel_download_threshold_mb",
+                cls.DEFAULT_PARALLEL_DOWNLOAD_THRESHOLD_MB,
+            ),
+            connection_pool_size=positive(
+                "connection_pool_size", cls.DEFAULT_CONNECTION_POOL_SIZE
+            ),
+            chunk_cache_mb=non_negative("chunk_cache_mb", cls.DEFAULT_CHUNK_CACHE_MB),
+            chunk_cache_readahead=non_negative(
+                "chunk_cache_readahead", cls.DEFAULT_CHUNK_CACHE_READAHEAD
+            ),
+        )
+
+
+@dataclass
 class TGFSConfig:
     users: dict[str, UserConfig]
     download: DownloadConfig
@@ -302,6 +419,7 @@ class TGFSConfig:
     server: ServerConfig
     encryption: EncryptionConfig
     sftp: SFTPConfig
+    transfer: TransferConfig
 
     @classmethod
     def from_dict(cls, data: Dict) -> Self:
@@ -324,6 +442,7 @@ class TGFSConfig:
             server=ServerConfig.from_dict(data["server"]),
             encryption=EncryptionConfig.from_dict(data.get("encryption")),
             sftp=SFTPConfig.from_dict(data.get("sftp")),
+            transfer=TransferConfig.from_dict(data.get("transfer")),
         )
 
 
