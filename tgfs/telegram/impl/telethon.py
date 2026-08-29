@@ -6,7 +6,7 @@ from typing import List, Optional, Sequence
 from telethon import TelegramClient
 from telethon import functions as tlf
 from telethon import types as tlt
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import FileReferenceExpiredError, SessionPasswordNeededError
 from telethon.helpers import TotalList
 from telethon.sessions import StringSession
 from telethon.tl.types import InputDocumentFileLocation, PeerChannel
@@ -237,14 +237,31 @@ class TelethonAPI(ITDLibClient):
             )
         return [SendMessageResp(message_id=m.id) for m in forwarded]
 
-    async def download_file(self, req: DownloadFileReq) -> DownloadFileResp:
-        messages = await self.__get_messages(
-            entity=PeerChannel(channel_id=req.chat), ids=[req.message_id]
-        )
-        message = self._transform_messages([messages[0]])[0]
+    async def _document_for(
+        self, chat: int, message_id: int, refresh: bool = False
+    ) -> Document:
+        """Resolve the document of a file message through the message cache.
 
-        if not message or not (document := message.document):
-            raise UnDownloadableMessage(messages[0].id)
+        A range request only needs the document's id, access hash and file
+        reference, so resolving the message again for every request costs a
+        round trip that the cache already paid for. ``refresh`` drops the
+        cached entry first, which is how an expired file reference is
+        recovered -- Telegram lets those go stale, and the cached copy would
+        otherwise keep failing.
+        """
+        if refresh:
+            channel_cache(chat).id[message_id] = None
+
+        messages = await self.get_messages(
+            GetMessagesReq(chat=chat, message_ids=(message_id,))
+        )
+
+        if not (message := messages[0]) or not message.document:
+            raise UnDownloadableMessage(message_id)
+        return message.document
+
+    async def download_file(self, req: DownloadFileReq) -> DownloadFileResp:
+        document = await self._document_for(req.chat, req.message_id)
 
         chunk_size = req.chunk_size * 1024
 
@@ -258,22 +275,39 @@ class TelethonAPI(ITDLibClient):
                     f"Invalid range: end must be greater than or equal to begin, got begin={req.begin} end={req.end}"
                 )
 
-            async for chunk in self._client.iter_download(
-                file=InputDocumentFileLocation(
-                    id=document.id,
-                    access_hash=document.access_hash,
-                    file_reference=document.file_reference,
-                    thumb_size="",
-                ),
-                chunk_size=chunk_size,
-                offset=req.begin,
-            ):
-                if len(chunk) > rest:
-                    chunk = chunk[:rest]
-                yield chunk
-                rest -= len(chunk)
-                if rest <= 0:
-                    break
+            doc = document
+            offset = req.begin
+            refreshed = False
+
+            while rest > 0:
+                try:
+                    async for chunk in self._client.iter_download(
+                        file=InputDocumentFileLocation(
+                            id=doc.id,
+                            access_hash=doc.access_hash,
+                            file_reference=doc.file_reference,
+                            thumb_size="",
+                        ),
+                        chunk_size=chunk_size,
+                        offset=offset,
+                    ):
+                        if len(chunk) > rest:
+                            chunk = chunk[:rest]
+                        yield chunk
+                        rest -= len(chunk)
+                        offset += len(chunk)
+                        if rest <= 0:
+                            break
+                except FileReferenceExpiredError:
+                    # Re-resolve once and resume where the stream stopped.
+                    if refreshed:
+                        raise
+                    refreshed = True
+                    doc = await self._document_for(
+                        req.chat, req.message_id, refresh=True
+                    )
+                    continue
+                break
 
         return DownloadFileResp(chunks=chunks(), size=bytes_to_read)
 

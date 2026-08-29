@@ -15,9 +15,16 @@ from tgfs.reqres import (
     UploadedFile,
 )
 from tgfs.telegram.interface import ITDLibClient
-from tgfs.utils.others import is_big_file
+from tgfs.utils.others import flood_wait_seconds, is_big_file
 
 logger = logging.getLogger(__name__)
+
+# A part that keeps failing has to give up eventually: the old unbounded,
+# sleepless retry turned one broken part into a busy loop against Telegram,
+# which is how a slow upload becomes a rate-limited one.
+MAX_PART_ATTEMPTS = 5
+RETRY_BASE_DELAY = 0.5
+RETRY_MAX_DELAY = 30.0
 
 
 @dataclass
@@ -69,8 +76,7 @@ class FileUploader:
         return await self._file_msg.read(length)
 
     async def _upload_chunk(self, chunk: FileChunk) -> None:
-        attempt = 0
-        while True:
+        for attempt in range(1, MAX_PART_ATTEMPTS + 1):
             try:
                 if self._is_big:
                     rsp = await self.client.save_big_file_part(
@@ -97,10 +103,26 @@ class FileUploader:
                 return
 
             except Exception as e:
+                if attempt == MAX_PART_ATTEMPTS:
+                    logger.error(
+                        f"Giving up on part {chunk.file_part} for {self._file_name} "
+                        f"after {attempt} attempts: {e}"
+                    )
+                    raise
+
+                if (wait := flood_wait_seconds(e)) is not None:
+                    delay = float(wait)
+                else:
+                    delay = min(
+                        RETRY_BASE_DELAY * 2 ** (attempt - 1), RETRY_MAX_DELAY
+                    )
+
                 logger.warning(
-                    f"Error uploading part {chunk.file_part} for {self._file_name}: {e}, attempt={attempt + 1}"
+                    f"Error uploading part {chunk.file_part} for {self._file_name}: "
+                    f"{e}, attempt={attempt}/{MAX_PART_ATTEMPTS}, "
+                    f"retrying in {delay:.1f}s"
                 )
-                attempt += 1
+                await asyncio.sleep(delay)
 
     def _done_reading(self) -> bool:
         return self._read_size >= self._file_size
@@ -150,11 +172,20 @@ class FileUploader:
                 if (tt := self._file_msg.task_tracker) and part_size > 0:
                     await tt.update_progress(size_delta=part_size)
 
-        await asyncio.gather(
-            *(create_worker(worker_id) for worker_id in range(self._num_workers))
-        )
-
-        await asyncio.sleep(0.5)
+        workers = [
+            asyncio.create_task(create_worker(worker_id))
+            for worker_id in range(self._num_workers)
+        ]
+        try:
+            await asyncio.gather(*workers)
+        except Exception:
+            # One dead part makes the whole file_id unusable, so the other
+            # workers should stop feeding it instead of uploading into a
+            # file that can never be sent.
+            for worker in workers:
+                worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+            raise
 
         await self._close()
         return self._file_size

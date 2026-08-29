@@ -5,7 +5,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.helpers import TotalList
 from telethon import types as tlt
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import FileReferenceExpiredError, SessionPasswordNeededError
 
 from tgfs.telegram.impl.telethon import (
     TelethonAPI,
@@ -15,6 +15,7 @@ from tgfs.telegram.impl.telethon import (
 )
 from tgfs.config import Config, TelegramConfig, BotConfig, AccountConfig
 from tgfs.errors import TechnicalError, UnDownloadableMessage
+from tgfs.utils.message_cache import global_message_cache
 from tgfs.reqres import (
     DeleteMessagesReq,
     GetMessagesReq,
@@ -34,6 +35,13 @@ from tgfs.reqres import (
 
 
 class TestTelethonAPI:
+    @pytest.fixture(autouse=True)
+    def clean_message_cache(self):
+        """Keep the process-wide message cache from leaking between tests."""
+        global_message_cache.clear()
+        yield
+        global_message_cache.clear()
+
     @pytest.fixture
     def mock_client(self, mocker) -> AsyncMock:
         client = mocker.AsyncMock(spec=TelegramClient)
@@ -488,6 +496,99 @@ class TestTelethonAPI:
         async for chunk in result.chunks:
             chunks.append(chunk)
         assert len(chunks) > 0
+
+    @pytest.mark.asyncio
+    async def test_download_file_resolves_the_message_only_once(
+        self, telethon_api, mock_chat, mock_document_message
+    ):
+        """Range requests should not each pay for resolving the message."""
+        telethon_api._client.get_messages.return_value = TotalList(
+            [mock_document_message]
+        )
+
+        async def mock_iter_download(*_args, **_kwargs):
+            yield b"chunk"
+
+        telethon_api._client.iter_download = mock_iter_download
+
+        for begin in (0, 100):
+            resp = await telethon_api.download_file(
+                DownloadFileReq(
+                    chat=mock_chat,
+                    message_id=54321,
+                    begin=begin,
+                    end=begin + 99,
+                    chunk_size=32,
+                )
+            )
+            async for _ in resp.chunks:
+                pass
+
+        assert telethon_api._client.get_messages.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_download_file_refreshes_an_expired_file_reference(
+        self, telethon_api, mock_chat, mock_document_message
+    ):
+        """A stale cached reference is re-resolved and the stream resumes."""
+        telethon_api._client.get_messages.return_value = TotalList(
+            [mock_document_message]
+        )
+
+        attempts = []
+
+        def mock_iter_download(*_args, **kwargs):
+            attempts.append(kwargs["offset"])
+
+            async def gen():
+                if len(attempts) == 1:
+                    yield b"aaa"
+                    raise FileReferenceExpiredError(request=None)
+                yield b"bbb"
+
+            return gen()
+
+        telethon_api._client.iter_download = mock_iter_download
+
+        resp = await telethon_api.download_file(
+            DownloadFileReq(
+                chat=mock_chat, message_id=54321, begin=0, end=5, chunk_size=32
+            )
+        )
+        chunks = [chunk async for chunk in resp.chunks]
+
+        assert chunks == [b"aaa", b"bbb"]
+        # The retry picks up where the failed stream stopped ...
+        assert attempts == [0, 3]
+        # ... and only after re-resolving the message.
+        assert telethon_api._client.get_messages.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_download_file_gives_up_on_a_second_expiry(
+        self, telethon_api, mock_chat, mock_document_message
+    ):
+        telethon_api._client.get_messages.return_value = TotalList(
+            [mock_document_message]
+        )
+
+        def mock_iter_download(*_args, **_kwargs):
+            async def gen():
+                raise FileReferenceExpiredError(request=None)
+                yield b""  # pragma: no cover - unreachable, keeps this a generator
+
+            return gen()
+
+        telethon_api._client.iter_download = mock_iter_download
+
+        resp = await telethon_api.download_file(
+            DownloadFileReq(
+                chat=mock_chat, message_id=54321, begin=0, end=5, chunk_size=32
+            )
+        )
+
+        with pytest.raises(FileReferenceExpiredError):
+            async for _ in resp.chunks:
+                pass
 
     @pytest.mark.asyncio
     async def test_download_file_message_without_document(

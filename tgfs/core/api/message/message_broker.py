@@ -4,13 +4,14 @@ from dataclasses import dataclass
 from functools import reduce
 from typing import List, Optional, Set
 
-from tgfs.config import get_config
 from tgfs.reqres import GetMessagesReq, GetMessagesResp, MessageResp
 from tgfs.telegram.interface import TDLibApi
 from tgfs.utils.message_cache import channel_cache
 
+# How long a batch collects further requests before it is sent. Counted from
+# the *first* pending request, so a steady stream of requests cannot keep
+# pushing the flush further out.
 DELAY = 0.5
-BOTS_COUNT = len(get_config().telegram.bot.tokens)
 
 
 logger = logging.getLogger(__name__)
@@ -40,16 +41,57 @@ class MessageBroker:
 
         async with self.__lock:
             self.__requests.append(Request(ids, future))
-            if self.__task and not self.__task.done():
-                self.__task.cancel()
-            self.__task = loop.create_task(self.process_requests())
+            if self.__task is None:
+                self.__task = loop.create_task(self.__collect())
         return await future
 
-    async def process_requests(self):
-        await asyncio.sleep(DELAY)
-        async with self.__lock:
-            requests, self.__requests = self.__requests, []
+    @property
+    def __bots_count(self) -> int:
+        """How many bot clients a failing request may be retried on.
 
+        Taken from the live client list rather than the config: a
+        deployment using the legacy single ``bot.token`` key has an empty
+        ``bot.tokens`` list, which would leave the retry loop with nothing
+        to iterate over.
+        """
+        return max(1, len(self.tdlib.bots))
+
+    async def __collect(self) -> None:
+        """Flush batches until a whole window passes with nothing pending.
+
+        Keeping one collector alive across batches is what bounds the wait:
+        requests that arrive while a batch is in flight join the next one
+        instead of each restarting the timer.
+        """
+        in_flight: List[Request] = []
+        try:
+            while True:
+                await asyncio.sleep(DELAY)
+                async with self.__lock:
+                    in_flight, self.__requests = self.__requests, []
+                await self.process_requests(in_flight)
+                in_flight = []
+                async with self.__lock:
+                    # Retire as soon as the queue runs dry rather than
+                    # idling through another window: a request arriving
+                    # later simply starts a fresh collector.
+                    if not self.__requests:
+                        self.__task = None
+                        return
+        except BaseException as ex:
+            # Nobody else will ever complete these futures, so a collector
+            # that dies -- cancelled at shutdown, or killed by an unexpected
+            # error -- has to hand the failure to its waiters instead of
+            # leaving them hanging. No await in between, so the swap needs
+            # no lock.
+            pending, self.__requests = self.__requests, []
+            self.__task = None
+            for request in (*in_flight, *pending):
+                if not request.future.done():
+                    request.future.set_exception(ex)
+            raise
+
+    async def process_requests(self, requests: List[Request]) -> None:
         if not requests:
             return
 
@@ -57,7 +99,7 @@ class MessageBroker:
 
         e: Optional[Exception] = None
         bot = self.tdlib.next_bot
-        for i in range(BOTS_COUNT):
+        for _ in range(self.__bots_count):
             try:
 
                 messages = await bot.get_messages(
@@ -76,8 +118,6 @@ class MessageBroker:
                             [messages_map.get(msg_id) for msg_id in r.ids]
                         )
                 return
-            except asyncio.CancelledError:
-                pass
             except Exception as ex:
                 e = ex
                 me = await bot.get_me()

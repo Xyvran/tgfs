@@ -279,12 +279,10 @@ class TestMessageApi:
         assert tasks[2] == (6, 10)
 
     def test_size_calculation(self):
-        # Test the _size method
-        assert (
-            MessageApi._size(0, 10) == -9
-        )  # Note: This seems like it might be a bug in the original code
-        # The method calculates begin - end + 1, which for (0, 10) gives 0 - 10 + 1 = -9
-        # It should probably be end - begin + 1 to get the size
+        # _size counts the bytes of an inclusive range
+        assert MessageApi._size(0, 10) == 11
+        assert MessageApi._size(0, 0) == 1
+        assert MessageApi._size(100, 199) == 100
 
     @pytest.mark.asyncio
     async def test_download_file_small(
@@ -326,15 +324,33 @@ class TestMessageApi:
         responses = [mock_response1, mock_response2]
         mock_tdlib.next_bot.download_file.side_effect = responses
 
+        # A range wide enough that both bots get a segment of their own
+        end = 4 * 1024 * 1024 - 1
+
         # Execute
-        result = await message_api.download_file(12345, 0, 99)
+        result = await message_api.download_file(12345, 0, end)
 
         # Assert
         assert mock_tdlib.next_bot.download_file.call_count == 2
         assert isinstance(result, DownloadFileResp)
-        assert (
-            result.size == -98
-        )  # Note: This reflects the _size method behavior (0 - 99 + 1 = -98)
+        assert result.size == end + 1
+
+    @pytest.mark.asyncio
+    async def test_download_file_parallel_caps_segments_for_short_ranges(
+        self, message_api, mock_tdlib, mocker
+    ):
+        """A range too short to fill one segment per bot stays in one piece.
+
+        Splitting further would hand some bots an empty (end < begin) range.
+        """
+        mocker.patch("tgfs.core.api.message.is_big_file", return_value=True)
+        mock_tdlib.next_bot.download_file.return_value = Mock(
+            spec=DownloadFileResp, chunks=AsyncMock(), size=100
+        )
+
+        await message_api.download_file(12345, 0, 99)
+
+        assert mock_tdlib.next_bot.download_file.call_count == 1
 
     @pytest.fixture
     def patch_delete_flag(self, mocker):

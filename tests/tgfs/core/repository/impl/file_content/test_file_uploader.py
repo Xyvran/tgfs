@@ -5,6 +5,7 @@ from typing import AsyncIterator
 import pytest
 
 from tgfs.core.repository.impl.file_content.file_uploader import (
+    MAX_PART_ATTEMPTS,
     FileChunk,
     WorkersConfig,
     FileUploader,
@@ -18,6 +19,15 @@ from tgfs.reqres import (
 )
 from tgfs.tasks.integrations import TaskTracker
 from tgfs.telegram.interface import ITDLibClient, TDLibApi
+
+
+@pytest.fixture
+def no_backoff(mocker):
+    """Skip the retry backoff so the retry tests do not sit in real sleeps."""
+    return mocker.patch(
+        "tgfs.core.repository.impl.file_content.file_uploader.asyncio.sleep",
+        new=mocker.AsyncMock(),
+    )
 
 
 class TestWorkersConfig:
@@ -330,14 +340,13 @@ class TestErrorHandling:
         return client
 
     @pytest.mark.asyncio
-    async def test_upload_response_failure(self, mock_client, mocker):
-        """Test handling of failed upload response"""
-        # Mock to fail 5 times, then succeed
+    async def test_upload_response_failure(self, mock_client, mocker, no_backoff):
+        """A part that fails within the retry budget still goes through."""
         failure_count = 0
 
         def side_effect(*_args, **_kwargs):
             nonlocal failure_count
-            if failure_count < 5:
+            if failure_count < MAX_PART_ATTEMPTS - 1:
                 failure_count += 1
                 return SaveFilePartResp(success=False)
             return SaveFilePartResp(success=True)
@@ -349,9 +358,48 @@ class TestErrorHandling:
 
         uploader = FileUploader(client=mock_client, file_msg=file_msg)
 
-        # Should eventually succeed after retries
         uploaded_size = await uploader.upload()
         assert uploaded_size == len(test_data)
+        assert mock_client.save_file_part.call_count == MAX_PART_ATTEMPTS
+
+    @pytest.mark.asyncio
+    async def test_upload_gives_up_after_the_retry_budget(
+        self, mock_client, mocker, no_backoff
+    ):
+        """A part that never succeeds fails the upload instead of looping."""
+        mock_client.save_file_part = mocker.AsyncMock(
+            side_effect=Exception("Network error")
+        )
+
+        file_msg = FileMessageFromBuffer.new(buffer=b"test data", name="doomed.txt")
+        uploader = FileUploader(client=mock_client, file_msg=file_msg)
+
+        with pytest.raises(Exception, match="Network error"):
+            await uploader.upload()
+
+        assert mock_client.save_file_part.call_count == MAX_PART_ATTEMPTS
+
+    @pytest.mark.asyncio
+    async def test_upload_waits_as_long_as_telegram_asks(self, mock_client, mocker):
+        """A flood error is retried after the delay Telegram named."""
+
+        class FloodWaitError(Exception):
+            seconds = 17
+
+        sleep = mocker.patch(
+            "tgfs.core.repository.impl.file_content.file_uploader.asyncio.sleep",
+            new=mocker.AsyncMock(),
+        )
+        mock_client.save_file_part = mocker.AsyncMock(
+            side_effect=[FloodWaitError(), SaveFilePartResp(success=True)]
+        )
+
+        file_msg = FileMessageFromBuffer.new(buffer=b"test data", name="flood.txt")
+        uploader = FileUploader(client=mock_client, file_msg=file_msg)
+
+        await uploader.upload()
+
+        sleep.assert_awaited_once_with(17.0)
 
 
 class TestConcurrencyAndWorkers:

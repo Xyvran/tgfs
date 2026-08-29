@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 # Telegram's messages.deleteMessages caps each request at 100 message ids.
 DELETE_BATCH_SIZE = 100
 
+# Smallest sub-range a parallel download is split into. Below this the extra
+# round trips outweigh the parallelism.
+MIN_PARALLEL_SEGMENT = 1024 * 1024
+
 rate = Rate(20, Duration.SECOND)
 bucket = InMemoryBucket([rate])
 limiter = Limiter(bucket, max_delay=60 * 1000)  # 60 seconds max delay
@@ -237,7 +241,19 @@ class MessageApi(MessageBroker):
 
     @staticmethod
     def _size(begin: int, end: int) -> int:
-        return begin - end + 1
+        """Number of bytes in the inclusive range ``[begin, end]``."""
+        return end - begin + 1
+
+    def _parallel_segments(self, begin: int, end: int) -> int:
+        """How many sub-ranges to split ``[begin, end]`` into.
+
+        Capped so that no segment falls below ``MIN_PARALLEL_SEGMENT``:
+        splitting a range into pieces smaller than a single download chunk
+        costs more round trips than it saves, and a range shorter than the
+        number of bots would even produce empty (end < begin) segments.
+        """
+        length = self._size(begin, end)
+        return max(1, min(len(self.tdlib.bots), length // MIN_PARALLEL_SEGMENT))
 
     async def download_file_parallel(self, message_id: int, begin: int, end: int):
         tasks = [
@@ -250,7 +266,9 @@ class MessageApi(MessageBroker):
                     end=e,
                 )
             )
-            for b, e in self.split_download_tasks(begin, end, len(self.tdlib.bots))
+            for b, e in self.split_download_tasks(
+                begin, end, self._parallel_segments(begin, end)
+            )
         ]
 
         res = [t.chunks for t in await asyncio.gather(*tasks)]
