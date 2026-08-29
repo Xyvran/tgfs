@@ -39,6 +39,7 @@ from tgfs.reqres import (
     SendTextReq,
 )
 from tgfs.telegram.interface import ITDLibClient
+from tgfs.utils.chunk_cache import chunk_cache
 from tgfs.utils.message_cache import channel_cache
 from tgfs.utils.others import exclude_none
 
@@ -126,6 +127,7 @@ class TelethonAPI(ITDLibClient):
 
     async def edit_message_text(self, req: EditMessageTextReq) -> SendMessageResp:
         channel_cache(req.chat).id[req.message_id] = None
+        chunk_cache().invalidate(req.chat, req.message_id)
         message = await self._client.edit_message(
             entity=PeerChannel(channel_id=req.chat),
             message=req.message_id,
@@ -135,6 +137,7 @@ class TelethonAPI(ITDLibClient):
 
     async def edit_message_media(self, req: EditMessageMediaReq) -> Message:
         channel_cache(req.chat).id[req.message_id] = None
+        chunk_cache().invalidate(req.chat, req.message_id)
         message = await self._client.edit_message(
             entity=PeerChannel(channel_id=req.chat),
             message=req.message_id,
@@ -332,6 +335,7 @@ class TelethonAPI(ITDLibClient):
         cache = channel_cache(req.chat).id
         for mid in req.message_ids:
             cache[mid] = None
+            chunk_cache().invalidate(req.chat, mid)
         await self._client.delete_messages(
             entity=PeerChannel(channel_id=req.chat),
             message_ids=list(req.message_ids),

@@ -17,6 +17,7 @@ from tgfs.telegram.impl.telethon import (
 from tgfs.config import TransferConfig
 from tgfs.config import Config, TelegramConfig, BotConfig, AccountConfig
 from tgfs.errors import TechnicalError, UnDownloadableMessage
+from tgfs.utils.chunk_cache import ChunkCache
 from tgfs.utils.message_cache import global_message_cache
 from tgfs.reqres import (
     DeleteMessagesReq,
@@ -1230,3 +1231,55 @@ class TestOpenExtraConnections:
         extra = await open_extra_connections(config, client)
 
         assert len(extra) == 1
+
+
+class TestChunkCacheInvalidation:
+    """Cached bytes must not outlive the message they came from."""
+
+    @pytest.fixture
+    def cache(self, mocker):
+        cache = ChunkCache(1024 * 1024)
+        mocker.patch("tgfs.telegram.impl.telethon.chunk_cache", return_value=cache)
+        return cache
+
+    @pytest.fixture
+    def api(self, mocker) -> TelethonAPI:
+        return TelethonAPI(mocker.AsyncMock(spec=TelegramClient))
+
+    @pytest.mark.asyncio
+    async def test_editing_a_message_drops_its_blocks(self, api, cache):
+        cache.put((5, 99, 0), b"stale")
+        cache.put((5, 100, 0), b"kept")
+
+        await api.edit_message_text(
+            EditMessageTextReq(chat=5, message_id=99, text="new")
+        )
+
+        assert not cache.contains((5, 99, 0))
+        assert cache.contains((5, 100, 0))
+
+    @pytest.mark.asyncio
+    async def test_replacing_the_document_drops_its_blocks(self, api, cache):
+        cache.put((5, 99, 0), b"stale")
+
+        await api.edit_message_media(
+            EditMessageMediaReq(
+                chat=5,
+                message_id=99,
+                file=UploadedFile(id=1, parts=1, name="f"),
+            )
+        )
+
+        assert not cache.contains((5, 99, 0))
+
+    @pytest.mark.asyncio
+    async def test_deleting_messages_drops_their_blocks(self, api, cache):
+        cache.put((5, 1, 0), b"a")
+        cache.put((5, 2, 0), b"b")
+        cache.put((5, 3, 0), b"c")
+
+        await api.delete_messages(DeleteMessagesReq(chat=5, message_ids=(1, 2)))
+
+        assert not cache.contains((5, 1, 0))
+        assert not cache.contains((5, 2, 0))
+        assert cache.contains((5, 3, 0))

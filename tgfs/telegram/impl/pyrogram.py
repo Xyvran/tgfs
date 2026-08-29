@@ -36,6 +36,7 @@ from tgfs.reqres import (
     SendTextReq,
 )
 from tgfs.telegram.interface import ITDLibClient
+from tgfs.utils.chunk_cache import chunk_cache
 from tgfs.utils.message_cache import channel_cache
 from tgfs.utils.others import exclude_none
 
@@ -116,6 +117,7 @@ class PyrogramAPI(ITDLibClient):
 
     async def edit_message_text(self, req: EditMessageTextReq) -> SendMessageResp:
         channel_cache(req.chat).id[req.message_id] = None
+        chunk_cache().invalidate(req.chat, req.message_id)
         message = await self._client.edit_message_text(
             chat_id=req.chat,
             message_id=req.message_id,
@@ -125,6 +127,7 @@ class PyrogramAPI(ITDLibClient):
 
     async def edit_message_media(self, req: EditMessageMediaReq) -> Message:
         channel_cache(req.chat).id[req.message_id] = None
+        chunk_cache().invalidate(req.chat, req.message_id)
 
         updates: rt.Updates = await self._client.invoke(
             rf.messages.EditMessage(
@@ -303,6 +306,7 @@ class PyrogramAPI(ITDLibClient):
         cache = channel_cache(req.chat).id
         for mid in req.message_ids:
             cache[mid] = None
+            chunk_cache().invalidate(req.chat, mid)
         await self._client.delete_messages(
             chat_id=req.chat, message_ids=list(req.message_ids)
         )

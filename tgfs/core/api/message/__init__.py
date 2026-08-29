@@ -1,5 +1,6 @@
+import asyncio
 import logging
-from typing import AsyncIterator, Iterable, Iterator, List
+from typing import AsyncIterator, Iterable, Iterator, List, Optional, Set
 
 from pyrate_limiter import Duration, InMemoryBucket, Limiter, Rate
 from telethon.errors import MessageNotModifiedError, RPCError
@@ -26,6 +27,12 @@ from tgfs.reqres import (
     SendTextReq,
 )
 from tgfs.telegram.interface import TDLibApi
+from tgfs.utils.chunk_cache import (
+    block_bounds,
+    block_length,
+    block_range,
+    chunk_cache,
+)
 from tgfs.utils.others import exclude_none
 from tgfs.utils.prefetching_chain import prefetching_chain
 
@@ -40,6 +47,10 @@ def _transfer() -> TransferConfig:
 # Telegram's messages.deleteMessages caps each request at 100 message ids.
 DELETE_BATCH_SIZE = 100
 
+# Read-ahead is speculative, so it must never crowd out the requests someone
+# is actually waiting on.
+MAX_READAHEAD_TASKS = 4
+
 
 rate = Rate(20, Duration.SECOND)
 bucket = InMemoryBucket([rate])
@@ -49,6 +60,7 @@ limiter = Limiter(bucket, max_delay=60 * 1000)  # 60 seconds max delay
 class MessageApi(MessageBroker):
     def __init__(self, tdlib: TDLibApi, private_file_channel: int):
         super().__init__(tdlib, private_file_channel)
+        self.__readahead: Set[tuple[int, int, int]] = set()
 
     @staticmethod
     def __try_acquire(name: str):
@@ -291,7 +303,177 @@ class MessageApi(MessageBroker):
             size=self._size(begin, end),
         )
 
+    async def _document_size(self, message_id: int) -> Optional[int]:
+        """On-wire size of a file message, or ``None`` if it is not one."""
+        messages = await self.get_messages([message_id])
+        if not (message := messages[0]) or not message.document:
+            return None
+        return message.document.size
+
+    async def _fetch_blocks(
+        self, message_id: int, first: int, last: int, size: int, block_size: int
+    ) -> AsyncIterator[tuple[int, bytes, bool]]:
+        """Fetch blocks ``first..last`` and cut the stream back into blocks.
+
+        Yields ``(index, data, complete)``. A block is complete when it has
+        the length it should have for its position -- the final block of a
+        document is legitimately short, a truncated stream is not, and only
+        the former may be cached.
+        """
+        begin, _ = block_bounds(first, block_size, size)
+        _, end = block_bounds(last, block_size, size)
+        resp = await self._download_uncached(message_id, begin, end)
+
+        buffer = bytearray()
+        index = first
+        async for chunk in resp.chunks:
+            buffer.extend(chunk)
+            while index <= last:
+                expected = block_length(index, block_size, size)
+                if len(buffer) < expected:
+                    break
+                yield index, bytes(buffer[:expected]), True
+                del buffer[:expected]
+                index += 1
+
+        if index <= last and buffer:
+            yield index, bytes(buffer), False
+
+    async def _cached_download(
+        self, message_id: int, begin: int, end: int, size: int, block_size: int
+    ) -> AsyncIterator[bytes]:
+        """Serve ``[begin, end]`` from cached blocks, fetching what is missing.
+
+        Missing blocks are fetched in runs rather than one at a time: a
+        request per block would trade the round trips this cache is meant to
+        save for a larger number of smaller ones.
+        """
+        cache = chunk_cache()
+        blocks = block_range(begin, min(end, size - 1), block_size)
+
+        index = blocks.start
+        while index < blocks.stop:
+            key = (self.private_file_channel, message_id, index)
+            if (cached := cache.get(key)) is not None:
+                yield self._slice(cached, index, block_size, begin, end)
+                index += 1
+                continue
+
+            # Everything up to the next cached block is fetched in one go.
+            run_end = index
+            while run_end + 1 < blocks.stop and not cache.contains(
+                (self.private_file_channel, message_id, run_end + 1)
+            ):
+                run_end += 1
+
+            async for position, block, complete in self._fetch_blocks(
+                message_id, index, run_end, size, block_size
+            ):
+                if complete:
+                    cache.put(
+                        (self.private_file_channel, message_id, position), block
+                    )
+                yield self._slice(block, position, block_size, begin, end)
+
+            index = run_end + 1
+
+    @staticmethod
+    def _slice(
+        block: bytes, index: int, block_size: int, begin: int, end: int
+    ) -> bytes:
+        """The part of one block that falls inside the requested range."""
+        block_begin = index * block_size
+        start = max(0, begin - block_begin)
+        stop = min(len(block), end - block_begin + 1)
+        return block[start:stop] if stop > start else b""
+
+    async def _download_cached(
+        self, message_id: int, begin: int, end: int
+    ) -> Optional[DownloadFileResp]:
+        """Wrap the download in the block cache, if it can be applied.
+
+        Returns ``None`` when the cache cannot help -- disabled, or a
+        message whose size is unknown -- so the caller falls through to the
+        plain path.
+        """
+        cache = chunk_cache()
+        if not cache.enabled or begin < 0:
+            return None
+
+        size = await self._document_size(message_id)
+        if size is None or size <= 0 or begin >= size:
+            return None
+
+        if end < 0 or end > size - 1:
+            end = size - 1
+        if end < begin:
+            return None
+
+        block_size = max(1, get_config().tgfs.download.chunk_size_kb * 1024)
+        self._schedule_readahead(message_id, end // block_size, size, block_size)
+
+        return DownloadFileResp(
+            chunks=self._cached_download(message_id, begin, end, size, block_size),
+            size=self._size(begin, end),
+        )
+
+    def _schedule_readahead(
+        self, message_id: int, after_block: int, size: int, block_size: int
+    ) -> None:
+        """Pull the blocks just past this request into the cache.
+
+        Readers rarely stop where they said they would: a player asks for a
+        few kilobytes and comes back for the next few, and an SFTP client
+        walks a whole file that way. Fetching the next blocks while the
+        current ones are being served turns the following request into a
+        cache hit.
+
+        Deliberately best-effort -- capped, de-duplicated, and silent about
+        failures, because nobody is waiting on it.
+        """
+        count = _transfer().chunk_cache_readahead
+        if count < 1 or len(self.__readahead) >= MAX_READAHEAD_TASKS:
+            return
+
+        cache = chunk_cache()
+        last_block = (size - 1) // block_size
+        wanted = [
+            index
+            for index in range(after_block + 1, min(after_block + count, last_block) + 1)
+            if not cache.contains((self.private_file_channel, message_id, index))
+        ]
+        if not wanted:
+            return
+
+        key = (message_id, wanted[0], wanted[-1])
+        if key in self.__readahead:
+            return
+        self.__readahead.add(key)
+
+        async def run() -> None:
+            try:
+                async for index, block, complete in self._fetch_blocks(
+                    message_id, wanted[0], wanted[-1], size, block_size
+                ):
+                    if complete:
+                        cache.put(
+                            (self.private_file_channel, message_id, index), block
+                        )
+            except Exception as ex:
+                logger.debug(f"Read-ahead for message {message_id} failed: {ex}")
+            finally:
+                self.__readahead.discard(key)
+
+        asyncio.create_task(run())
+
     async def download_file(
+        self, message_id: int, begin: int, end: int
+    ) -> DownloadFileResp:
+        if (cached := await self._download_cached(message_id, begin, end)) is not None:
+            return cached
+        return await self._download_uncached(message_id, begin, end)
+
+    async def _download_uncached(
         self, message_id: int, begin: int, end: int
     ) -> DownloadFileResp:
         if (
