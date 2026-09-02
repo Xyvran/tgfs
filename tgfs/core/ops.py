@@ -252,6 +252,14 @@ class Ops:
             ),
         )
 
+    async def upload_from_msg(
+        self, file_msg: UploadableFileMessage, remote: str
+    ) -> TGFSFileDesc:
+        self._validate_path(remote)
+        dirname = os.path.dirname(remote)
+
+        return await self._upload(dirname, file_msg)
+
     async def import_from_existing_file_message(
         self, message: MessageRespWithDocument, remote: str
     ) -> TGFSFileDesc:

@@ -74,8 +74,13 @@ def build_client(mocker, name: str, channel: FakeChannel) -> Client:
 
     async def upload(directory, file_msg):
         # `touch` sends a FileMessageEmpty, which carries no readable body.
-        size = file_msg.size or 0
-        data = await file_msg.read(size) if size > 0 else b""
+        size = getattr(file_msg, "size", 0)
+        chunks = []
+        read_fn = getattr(file_msg, "read", None)
+        if read_fn and size != 0:
+            while chunk := await read_fn(64 * 1024):
+                chunks.append(chunk)
+        data = b"".join(chunks)
         if not directory.find_files([file_msg.name]):
             channel.add_file(directory, file_msg.name, data)
         else:
