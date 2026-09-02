@@ -7,6 +7,7 @@ from tgfs.core.mirror import MirrorGroup
 from tgfs.core.model import TGFSFileVersion
 from tgfs.core.repository.interface import IFileContentRepository
 from tgfs.errors import TechnicalError
+from tgfs.config import get_config
 from tgfs.reqres import (
     EditMessageMediaReq,
     FileContent,
@@ -84,6 +85,8 @@ class TGMsgFileContentRepository(IFileContentRepository):
 
     async def save(self, file_msg: UploadableFileMessage) -> List[SentFileMessage]:
         size = file_msg.get_size()
+        if size < 0:
+            return await self._save_streaming(file_msg)
 
         res: List[SentFileMessage] = []
         file_name = file_msg.name or "unnamed"
@@ -115,6 +118,108 @@ class TGMsgFileContentRepository(IFileContentRepository):
             for channel_key, mirror_ids in mirror_map.items():
                 for sent, mirror_id in zip(res, mirror_ids):
                     sent.mirrors[channel_key] = mirror_id
+        return res
+
+    async def _cleanup_sent_parts(self, sent_messages: List[SentFileMessage]) -> None:
+        """Clean up orphan Telegram messages (primary and mirrors) created during a failed or aborted upload."""
+        if not sent_messages:
+            return
+        primary_ids = [m.message_id for m in sent_messages if m.message_id > 0]
+        mirror_ids: dict[str, List[int]] = {}
+        for m in sent_messages:
+            for channel_key, mid in m.mirrors.items():
+                if mid > 0:
+                    mirror_ids.setdefault(channel_key, []).append(mid)
+
+        if primary_ids:
+            try:
+                await self._message_api.delete_messages(primary_ids, force=True)
+            except Exception as ex:
+                logger.warning(f"Failed to delete primary orphan messages {primary_ids}: {ex}")
+
+        if mirror_ids and self._mirror_group:
+            try:
+                await self._mirror_group.delete(mirror_ids, force=True)
+            except Exception as ex:
+                logger.warning(f"Failed to delete mirror orphan messages {mirror_ids}: {ex}")
+
+    async def _save_streaming(
+        self, file_msg: UploadableFileMessage
+    ) -> List[SentFileMessage]:
+        res: List[SentFileMessage] = []
+        file_name = file_msg.name or "unnamed"
+        streaming_part_size = (
+            get_config().tgfs.transfer.streaming_part_size_bytes
+        )
+
+        part_idx = 1
+        class _PartStreamWrapper(UploadableFileMessage):
+            def __init__(self, parent_msg: UploadableFileMessage, max_size: int, name: str):
+                super().__init__(
+                    name=name,
+                    size=-1,
+                    caption=parent_msg.caption,
+                    tags=parent_msg.tags,
+                    _offset=0,
+                    _read_size=0,
+                    task_tracker=parent_msg.task_tracker,
+                )
+                self.parent_msg = parent_msg
+                self.max_size = max_size
+                self.bytes_read = 0
+
+            async def read(self, length: int) -> bytes:
+                if self.bytes_read >= self.max_size:
+                    return b""
+                want = min(length, self.max_size - self.bytes_read)
+                data = await self.parent_msg.read(want)
+                if data:
+                    self.bytes_read += len(data)
+                return data
+
+            def get_size(self) -> int:
+                return self.bytes_read
+
+        try:
+            while True:
+                ensure_fn = getattr(file_msg, "ensure_available_bytes", None)
+                if ensure_fn is not None:
+                    avail = await ensure_fn(streaming_part_size)
+                    if avail == 0:
+                        break
+
+                part_wrapper = _PartStreamWrapper(
+                    parent_msg=file_msg,
+                    max_size=streaming_part_size,
+                    name=f"[part{part_idx}]{file_name}",
+                )
+                sent_msg = await self._send_file(
+                    part_wrapper, use_account_api=False
+                )
+                if part_wrapper.bytes_read > 0:
+                    res.append(sent_msg)
+                    part_idx += 1
+                else:
+                    break
+
+                if part_wrapper.bytes_read < streaming_part_size:
+                    break
+        except Exception:
+            await self._cleanup_sent_parts(res)
+            raise
+
+        if self._mirror_group and res:
+            try:
+                mirror_map = await self._mirror_group.mirror_parts(
+                    [m.message_id for m in res]
+                )
+                for channel_key, mirror_ids in mirror_map.items():
+                    for sent, mirror_id in zip(res, mirror_ids):
+                        sent.mirrors[channel_key] = mirror_id
+            except Exception:
+                await self._cleanup_sent_parts(res)
+                raise
+
         return res
 
     async def update(self, message_id: int, buffer: bytes, name: str) -> int:
