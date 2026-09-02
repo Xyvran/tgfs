@@ -315,3 +315,99 @@ class FileMessageImported(FileMessage):
         cls, message_id: int, size: int, name: str = "unnamed"
     ) -> "FileMessageImported":
         return cls(name=name, size=size, message_id=message_id)
+
+
+@dataclass
+class FileMessageFromStreamingQueue(UploadableFileMessage):
+    _queue: Optional[asyncio.Queue[Optional[bytes]]] = field(default=None, init=False, repr=False)
+    _buffer: bytearray = field(default_factory=bytearray, init=False, repr=False)
+    _queue_finished: bool = field(default=False, init=False, repr=False)
+    _finished: bool = field(default=False, init=False, repr=False)
+    _exception: Optional[Exception] = field(default=None, init=False, repr=False)
+    _total_pushed: int = field(default=0, init=False, repr=False)
+
+    def _get_queue(self) -> asyncio.Queue[Optional[bytes]]:
+        if self._queue is None:
+            self._queue = asyncio.Queue()
+        return self._queue
+
+    @classmethod
+    def new(cls, name: str = "unnamed") -> "FileMessageFromStreamingQueue":
+        return cls(
+            name=name,
+            size=-1,
+            caption="",
+            tags=FileTags(),
+            _offset=0,
+            _read_size=0,
+            task_tracker=None,
+        )
+
+    def push_data(self, data: bytes) -> None:
+        if self._queue_finished or self._exception:
+            return
+        if data:
+            self._total_pushed += len(data)
+            self._get_queue().put_nowait(data)
+
+    def finish(self) -> None:
+        if not self._queue_finished:
+            self._queue_finished = True
+            self._get_queue().put_nowait(None)
+
+    def abort(self, exc: Optional[Exception] = None) -> None:
+        if not self._queue_finished:
+            self._queue_finished = True
+            self._exception = exc or asyncio.CancelledError("Upload aborted")
+            self._get_queue().put_nowait(None)
+
+    async def open(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+    async def ensure_available_bytes(self, target_bytes: int) -> int:
+        if self._exception:
+            raise self._exception
+
+        queue = self._get_queue()
+        while len(self._buffer) < target_bytes and not self._finished:
+            if queue.empty() and self._buffer:
+                break
+            item = await queue.get()
+            if item is None:
+                self._finished = True
+                break
+            self._buffer.extend(item)
+
+        return len(self._buffer)
+
+    async def read(self, length: int) -> bytes:
+        if self._exception:
+            raise self._exception
+
+        queue = self._get_queue()
+        while len(self._buffer) < length and not self._finished:
+            if queue.empty() and self._buffer:
+                break
+            item = await queue.get()
+            if item is None:
+                self._finished = True
+                break
+            self._buffer.extend(item)
+
+        if self._exception:
+            raise self._exception
+
+        if not self._buffer:
+            return b""
+
+        size_to_return = min(length, len(self._buffer))
+        res = bytes(self._buffer[:size_to_return])
+        del self._buffer[:size_to_return]
+        self._read_size += len(res)
+        return res
+
+    def get_size(self) -> int:
+        return self.size

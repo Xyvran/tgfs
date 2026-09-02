@@ -315,6 +315,7 @@ class TransferConfig:
     upload_workers_small: int
     upload_workers_big: int
     upload_part_size_kb: int
+    streaming_part_size_mb: int
     download_piece_size_kb: int
     download_pieces_in_flight: int
     parallel_download_threshold_mb: int
@@ -329,6 +330,7 @@ class TransferConfig:
     # size, so there is no reason to send the smaller parts the library
     # would otherwise pick for files below 750 MB.
     DEFAULT_UPLOAD_PART_SIZE_KB = 512
+    DEFAULT_STREAMING_PART_SIZE_MB = 256
     DEFAULT_DOWNLOAD_PIECE_SIZE_KB = 4096
     DEFAULT_DOWNLOAD_PIECES_IN_FLIGHT = 4
     DEFAULT_PARALLEL_DOWNLOAD_THRESHOLD_MB = 10
@@ -344,6 +346,10 @@ class TransferConfig:
     @property
     def upload_part_size_bytes(self) -> int:
         return self.upload_part_size_kb * 1024
+
+    @property
+    def streaming_part_size_bytes(self) -> int:
+        return self.streaming_part_size_mb * 1024 * 1024
 
     @property
     def parallel_download_threshold_bytes(self) -> int:
@@ -390,6 +396,9 @@ class TransferConfig:
                 "upload_workers_big", cls.DEFAULT_UPLOAD_WORKERS_BIG
             ),
             upload_part_size_kb=part_size,
+            streaming_part_size_mb=positive(
+                "streaming_part_size_mb", cls.DEFAULT_STREAMING_PART_SIZE_MB
+            ),
             download_piece_size_kb=positive(
                 "download_piece_size_kb", cls.DEFAULT_DOWNLOAD_PIECE_SIZE_KB
             ),

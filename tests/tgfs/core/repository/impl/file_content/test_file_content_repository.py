@@ -457,6 +457,100 @@ class TestIntegration:
             await repository.save(file_msg)
 
 
+class TestStreamingUploads:
+    """Test streaming uploads and orphan cleanup in TGMsgFileContentRepository"""
+
+    @pytest.mark.asyncio
+    async def test_save_streaming_roundtrip(self, repository, mock_uploader, monkeypatch):
+        import tgfs.config
+        cfg = tgfs.config.get_config()
+        monkeypatch.setattr(cfg.tgfs.transfer, "streaming_part_size_mb", 1)  # 1 MB part size
+
+        from tgfs.reqres import SentFileMessage
+
+        def make_mock_uploader(client, file_msg, workers=None):
+            uploader = Mock()
+            uploader.client = client
+            uploader.file_msg = file_msg
+
+            async def streaming_upload():
+                read_total = 0
+                while chunk := await uploader.file_msg.read(64 * 1024):
+                    read_total += len(chunk)
+                uploader._size = read_total
+                return read_total
+
+            async def send(chat_id, caption=""):
+                return Mock(message_id=10000 + getattr(uploader, "_size", 0))
+
+            uploader.upload = streaming_upload
+            uploader.send = send
+            return uploader
+
+        monkeypatch.setattr("tgfs.core.repository.impl.file_content.FileUploader", make_mock_uploader)
+
+        from tgfs.reqres import FileMessageFromStreamingQueue
+        msg = FileMessageFromStreamingQueue.new(name="stream.bin")
+        data = b"X" * (1024 * 1024 + 500)
+        msg.push_data(data)
+        msg.finish()
+
+        sent = await repository.save(msg)
+        assert len(sent) == 2
+        assert sent[0].size == 1024 * 1024
+        assert sent[1].size == 500
+
+    @pytest.mark.asyncio
+    async def test_save_streaming_cleanup_on_error(self, repository, mock_uploader, mock_message_api, monkeypatch, mocker):
+        import tgfs.config
+        cfg = tgfs.config.get_config()
+        monkeypatch.setattr(cfg.tgfs.transfer, "streaming_part_size_mb", 1)
+
+        def make_mock_uploader(client, file_msg, workers=None):
+            uploader = Mock()
+            uploader.client = client
+            uploader.file_msg = file_msg
+
+            async def streaming_upload():
+                read_total = 0
+                while chunk := await uploader.file_msg.read(64 * 1024):
+                    read_total += len(chunk)
+                uploader._size = read_total
+                return read_total
+
+            async def send(chat_id, caption=""):
+                return Mock(message_id=10000 + getattr(uploader, "_size", 0))
+
+            uploader.upload = streaming_upload
+            uploader.send = send
+            return uploader
+
+        monkeypatch.setattr("tgfs.core.repository.impl.file_content.FileUploader", make_mock_uploader)
+
+        from tgfs.reqres import FileMessageFromStreamingQueue
+        msg = FileMessageFromStreamingQueue.new(name="stream.bin")
+        data = b"Y" * (1024 * 1024 * 2)
+        msg.push_data(data)
+        msg.finish()
+
+        send_count = 0
+        original_send_file = repository._send_file
+
+        async def mock_send_file(file_msg, use_account_api):
+            nonlocal send_count
+            send_count += 1
+            if send_count == 2:
+                raise RuntimeError("Upload error on second part")
+            return await original_send_file(file_msg, use_account_api)
+
+        mocker.patch.object(repository, "_send_file", side_effect=mock_send_file)
+
+        with pytest.raises(RuntimeError, match="Upload error on second part"):
+            await repository.save(msg)
+
+        mock_message_api.delete_messages.assert_called()
+
+
 class TestEdgeCases:
     """Test edge cases and boundary conditions"""
 

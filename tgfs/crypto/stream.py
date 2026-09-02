@@ -143,6 +143,18 @@ class EncryptingFileMessage(UploadableFileMessage):
 
         return bytes(out)
 
+    async def ensure_available_bytes(self, target_bytes: int) -> int:
+        inner_fn = getattr(self.inner, "ensure_available_bytes", None)
+        if inner_fn is not None:
+            plaintext_target = max(1, target_bytes - HEADER_SIZE)
+            avail_plaintext = await inner_fn(plaintext_target)
+            if avail_plaintext == 0:
+                return 0
+            return HEADER_SIZE + ciphertext_size_for_plaintext(
+                avail_plaintext, self.cipher.chunk_size
+            )
+        return target_bytes
+
     async def _read_plaintext_chunk(self) -> bytes:
         """Read exactly one plaintext crypto-chunk from the inner message.
 

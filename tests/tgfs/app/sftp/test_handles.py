@@ -130,7 +130,15 @@ class TestWriteHandle:
             assert len(data) == size
             ops.uploaded[remote] = data
 
+        async def upload_from_msg(file_msg, remote):
+            chunks = []
+            while chunk := await file_msg.read(64 * 1024):
+                chunks.append(chunk)
+            data = b"".join(chunks)
+            ops.uploaded[remote] = data
+
         ops.upload_from_stream = mocker.AsyncMock(side_effect=upload_from_stream)
+        ops.upload_from_msg = mocker.AsyncMock(side_effect=upload_from_msg)
         return ops
 
     async def test_sequential_writes_are_uploaded_in_order(self, ops):
