@@ -7,6 +7,7 @@ from typing import List, Optional, Sequence
 from telethon import TelegramClient
 from telethon import functions as tlf
 from telethon import types as tlt
+from telethon.client.downloads import MAX_CHUNK_SIZE
 from telethon.errors import FileReferenceExpiredError, SessionPasswordNeededError
 from telethon.helpers import TotalList
 from telethon.sessions import StringSession
@@ -44,6 +45,14 @@ from tgfs.utils.message_cache import channel_cache
 from tgfs.utils.others import exclude_none
 
 logger = logging.getLogger(__name__)
+
+# Telegram answers ``upload.getFile`` requests that straddle a 1 MiB
+# boundary with the bytes up to that boundary only, and Telethon takes any
+# short reply for the end of the file -- so a download starting 8 KiB
+# before such a boundary silently stops after 8 KiB. A request that starts
+# at a multiple of its own size never straddles one, hence every download
+# starts at such an offset and the bytes before the wanted one are dropped.
+DOWNLOAD_REQUEST_SIZE = MAX_CHUNK_SIZE
 
 
 class TelethonAPI(ITDLibClient):
@@ -296,6 +305,8 @@ class TelethonAPI(ITDLibClient):
             refreshed = False
 
             while rest > 0:
+                aligned = offset - offset % DOWNLOAD_REQUEST_SIZE
+                skip = offset - aligned
                 try:
                     async for chunk in self._transfer_client.iter_download(
                         file=InputDocumentFileLocation(
@@ -304,8 +315,15 @@ class TelethonAPI(ITDLibClient):
                             file_reference=doc.file_reference,
                             thumb_size="",
                         ),
-                        offset=offset,
+                        offset=aligned,
+                        request_size=DOWNLOAD_REQUEST_SIZE,
                     ):
+                        if skip:
+                            if len(chunk) <= skip:
+                                skip -= len(chunk)
+                                continue
+                            chunk = chunk[skip:]
+                            skip = 0
                         if len(chunk) > rest:
                             chunk = chunk[:rest]
                         yield chunk
@@ -323,6 +341,16 @@ class TelethonAPI(ITDLibClient):
                     )
                     continue
                 break
+
+            if rest > 0:
+                # A stream that stops early would otherwise be passed on as
+                # a complete one, and the caller has already promised the
+                # full range to its client.
+                raise TechnicalError(
+                    f"Download of message {req.message_id} ended after "
+                    f"{bytes_to_read - rest} of {bytes_to_read} bytes "
+                    f"(range {req.begin}-{req.end})"
+                )
 
         return DownloadFileResp(chunks=chunks(), size=bytes_to_read)
 

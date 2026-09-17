@@ -42,6 +42,10 @@ from tgfs.utils.others import exclude_none
 
 logger = logging.getLogger(__name__)
 
+# ``Client.get_file`` counts its offset in chunks of this size, not in
+# bytes, and always starts on a chunk boundary.
+GET_FILE_CHUNK_SIZE = 1024 * 1024
+
 
 T = TypeVar("T")
 
@@ -286,17 +290,36 @@ class PyrogramAPI(ITDLibClient):
                     f"Invalid range: end must be greater than or equal to begin, got begin={req.begin} end={req.end}"
                 )
 
+            # The bytes between the chunk boundary and the wanted offset
+            # arrive first and are dropped.
+            skip = req.begin % GET_FILE_CHUNK_SIZE
             if res := self._client.get_file(
                 file_id=file_id.FileId.decode(message.document.file_id),
-                offset=req.begin,
+                offset=req.begin // GET_FILE_CHUNK_SIZE,
             ):
                 async for chunk in res:
+                    if skip:
+                        if len(chunk) <= skip:
+                            skip -= len(chunk)
+                            continue
+                        chunk = chunk[skip:]
+                        skip = 0
                     if len(chunk) > rest:
                         chunk = chunk[:rest]
                     yield chunk
                     rest -= len(chunk)
                     if rest <= 0:
                         break
+
+            if rest > 0:
+                # A stream that stops early would otherwise be passed on as
+                # a complete one, and the caller has already promised the
+                # full range to its client.
+                raise TechnicalError(
+                    f"Download of message {req.message_id} ended after "
+                    f"{bytes_to_read - rest} of {bytes_to_read} bytes "
+                    f"(range {req.begin}-{req.end})"
+                )
 
         return DownloadFileResp(chunks=chunks(), size=bytes_to_read)
 

@@ -156,10 +156,20 @@ class TGMsgFileContentRepository(IFileContentRepository):
     def _get_file_parts_indexed(
         fv: TGFSFileVersion, begin: int, end: int
     ) -> Generator[tuple[int, int, int, int]]:
+        """Map the inclusive byte range ``[begin, end]`` onto the parts.
+
+        Yields ``(part index, message id, begin, end)`` with the bounds
+        relative to the part and, like the input, inclusive. ``end < 0``
+        means the end of the file, and an ``end`` past it is clamped there:
+        clients do ask past the end, and the body then stops at the last
+        byte that exists. A part is never asked for more bytes than it
+        holds: that could only be served by a download stopping short,
+        which the backends reject.
+        """
         if fv.size <= 0:
             return
-        if end < 0:
-            end = fv.size
+        if end < 0 or end >= fv.size:
+            end = fv.size - 1
         if begin < 0:
             raise TechnicalError(
                 f"Invalid begin value {begin} for file version {fv.id} with size {fv.size}"
@@ -167,10 +177,6 @@ class TGMsgFileContentRepository(IFileContentRepository):
         if begin > end:
             raise TechnicalError(
                 f"Invalid range: begin {begin} is greater than end {end} for file version {fv.id}"
-            )
-        if end > fv.size:
-            raise TechnicalError(
-                f"Invalid end value {end} for file version {fv.id} with size {fv.size}"
             )
 
         offset = 0
@@ -185,11 +191,11 @@ class TGMsgFileContentRepository(IFileContentRepository):
                 f"Begin offset {begin} exceeds total file size {fv.size} for file version {fv.id}"
             )
 
-        while i_part < len(fv.part_sizes) and offset < end:
+        while i_part < len(fv.part_sizes) and offset <= end:
             part_size = fv.part_sizes[i_part]
             part_begin = max(0, begin - offset)
-            part_end = min(part_size, end - offset)
-            if part_begin < part_end:
+            part_end = min(part_size - 1, end - offset)
+            if part_begin <= part_end:
                 yield i_part, fv.message_ids[i_part], part_begin, part_end
             offset += part_size
             i_part += 1

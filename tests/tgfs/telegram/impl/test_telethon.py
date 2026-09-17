@@ -8,6 +8,7 @@ from telethon import types as tlt
 from telethon.errors import FileReferenceExpiredError, SessionPasswordNeededError
 
 from tgfs.telegram.impl.telethon import (
+    DOWNLOAD_REQUEST_SIZE,
     TelethonAPI,
     Session,
     login_as_account,
@@ -484,7 +485,7 @@ class TestTelethonAPI:
         telethon_api._client.iter_download = mock_iter_download
 
         req = DownloadFileReq(
-            chat=mock_chat, message_id=54321, begin=0, end=99
+            chat=mock_chat, message_id=54321, begin=0, end=17
         )
 
         result = await telethon_api.download_file(req)
@@ -492,13 +493,13 @@ class TestTelethonAPI:
         telethon_api._client.get_messages.assert_called_once_with(
             entity=tlt.PeerChannel(mock_chat), ids=[54321]
         )
-        assert result.size == 100  # end - begin + 1
+        assert result.size == 18  # end - begin + 1
 
         # Test the async iterator
         chunks = []
         async for chunk in result.chunks:
             chunks.append(chunk)
-        assert len(chunks) > 0
+        assert chunks == [b"chunk1", b"chunk2", b"chunk3"]
 
     @pytest.mark.asyncio
     async def test_download_file_resolves_the_message_only_once(
@@ -514,13 +515,13 @@ class TestTelethonAPI:
 
         telethon_api._client.iter_download = mock_iter_download
 
-        for begin in (0, 100):
+        for begin in (0, DOWNLOAD_REQUEST_SIZE):
             resp = await telethon_api.download_file(
                 DownloadFileReq(
                     chat=mock_chat,
                     message_id=54321,
                     begin=begin,
-                    end=begin + 99,
+                    end=begin + 4,
                 )
             )
             async for _ in resp.chunks:
@@ -538,15 +539,18 @@ class TestTelethonAPI:
         )
 
         attempts = []
+        begin = 2 * DOWNLOAD_REQUEST_SIZE + 5
 
         def mock_iter_download(*_args, **kwargs):
             attempts.append(kwargs["offset"])
 
             async def gen():
+                # Both attempts start at the aligned offset; what is
+                # served before the wanted byte is dropped by the caller.
                 if len(attempts) == 1:
-                    yield b"aaa"
+                    yield b"_____aaa"
                     raise FileReferenceExpiredError(request=None)
-                yield b"bbb"
+                yield b"________bbb"
 
             return gen()
 
@@ -554,16 +558,81 @@ class TestTelethonAPI:
 
         resp = await telethon_api.download_file(
             DownloadFileReq(
-                chat=mock_chat, message_id=54321, begin=0, end=5
+                chat=mock_chat, message_id=54321, begin=begin, end=begin + 5
             )
         )
         chunks = [chunk async for chunk in resp.chunks]
 
         assert chunks == [b"aaa", b"bbb"]
-        # The retry picks up where the failed stream stopped ...
-        assert attempts == [0, 3]
+        # The retry picks up where the failed stream stopped: same aligned
+        # request, the three bytes already delivered are skipped ...
+        assert attempts == [2 * DOWNLOAD_REQUEST_SIZE] * 2
         # ... and only after re-resolving the message.
         assert telethon_api._client.get_messages.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_download_file_starts_requests_on_an_aligned_offset(
+        self, telethon_api, mock_chat, mock_document_message
+    ):
+        """A getFile request must not straddle a 1 MiB boundary, or Telegram
+        cuts the reply there and Telethon takes that for the end of the
+        file. Requests start at a multiple of their size instead, and the
+        bytes before the wanted offset are dropped -- across chunks too."""
+        telethon_api._client.get_messages.return_value = TotalList(
+            [mock_document_message]
+        )
+
+        calls = []
+
+        def mock_iter_download(*_args, **kwargs):
+            calls.append(kwargs)
+
+            async def gen():
+                yield b"ab"
+                yield b"cd"
+                yield b"efgh"
+                yield b"ijkl"
+
+            return gen()
+
+        telethon_api._client.iter_download = mock_iter_download
+
+        begin = 2 * DOWNLOAD_REQUEST_SIZE + 3
+        resp = await telethon_api.download_file(
+            DownloadFileReq(
+                chat=mock_chat, message_id=54321, begin=begin, end=begin + 6
+            )
+        )
+        chunks = [chunk async for chunk in resp.chunks]
+
+        assert len(calls) == 1
+        assert calls[0]["offset"] == 2 * DOWNLOAD_REQUEST_SIZE
+        assert calls[0]["request_size"] == DOWNLOAD_REQUEST_SIZE
+        assert chunks == [b"d", b"efgh", b"ij"]
+
+    @pytest.mark.asyncio
+    async def test_download_file_fails_when_the_stream_ends_early(
+        self, telethon_api, mock_chat, mock_document_message
+    ):
+        """Fewer bytes than the range is an error, not a shorter file."""
+        telethon_api._client.get_messages.return_value = TotalList(
+            [mock_document_message]
+        )
+
+        async def mock_iter_download(*_args, **_kwargs):
+            yield b"12345678"
+
+        telethon_api._client.iter_download = mock_iter_download
+
+        resp = await telethon_api.download_file(
+            DownloadFileReq(chat=mock_chat, message_id=54321, begin=0, end=99)
+        )
+
+        served = []
+        with pytest.raises(TechnicalError, match="ended after 8 of 100 bytes"):
+            async for chunk in resp.chunks:
+                served.append(chunk)
+        assert served == [b"12345678"]
 
     @pytest.mark.asyncio
     async def test_download_file_gives_up_on_a_second_expiry(

@@ -137,8 +137,8 @@ class TestStaticMethods:
         )
 
         assert len(parts) == 2
-        assert parts[0] == (1001, 0, 1000)  # First part, full
-        assert parts[1] == (1002, 0, 1000)  # Second part, full
+        assert parts[0] == (1001, 0, 999)  # First part, full
+        assert parts[1] == (1002, 0, 999)  # Second part, full
 
     def test_get_file_part_to_download_partial_range(self, sample_file_version):
         """Test getting parts for partial file download"""
@@ -149,7 +149,7 @@ class TestStaticMethods:
         )
 
         assert len(parts) == 2
-        assert parts[0] == (1001, 500, 1000)  # First part, from byte 500 to end
+        assert parts[0] == (1001, 500, 999)  # First part, from byte 500 to end
         assert parts[1] == (1002, 0, 500)  # Second part, from start to byte 500
 
     def test_get_file_part_to_download_single_part_range(self, sample_file_version):
@@ -200,22 +200,38 @@ class TestStaticMethods:
             )
 
     def test_get_file_part_to_download_end_exceeds_size(self, sample_file_version):
-        """Test error handling for end exceeding file size"""
-        with pytest.raises(TechnicalError, match="Invalid end value 3000"):
-            list(
-                TGMsgFileContentRepository._get_file_part_to_download(
-                    sample_file_version, 0, 3000
-                )
+        """An end past the file is clamped to its last byte"""
+        parts = list(
+            TGMsgFileContentRepository._get_file_part_to_download(
+                sample_file_version, 500, 3000
             )
+        )
+
+        assert parts == [(1001, 500, 999), (1002, 0, 999)]
 
     def test_get_file_part_to_download_begin_exceeds_size(self, sample_file_version):
         """Test error handling for begin exceeding file size"""
-        with pytest.raises(TechnicalError, match="Invalid end value 3000"):
+        with pytest.raises(
+            TechnicalError, match="Invalid range: begin 2500 is greater than end 1999"
+        ):
             list(
                 TGMsgFileContentRepository._get_file_part_to_download(
                     sample_file_version, 2500, 3000
                 )
             )
+
+    def test_get_file_part_to_download_never_asks_past_a_part(
+        self, sample_file_version
+    ):
+        """A part is asked for its own bytes only -- one more than it has
+        could only be served by a download stopping short."""
+        parts = list(
+            TGMsgFileContentRepository._get_file_part_to_download(
+                sample_file_version, 0, 1000
+            )
+        )
+
+        assert parts == [(1001, 0, 999), (1002, 0, 0)]
 
 
 class TestSaveMethod:
@@ -495,7 +511,7 @@ class TestEdgeCases:
             TGMsgFileContentRepository._get_file_part_to_download(tiny_version, 0, -1)
         )
         assert len(parts) == 1
-        assert parts[0] == (999, 0, 1)
+        assert parts[0] == (999, 0, 0)
 
         # Range at exact boundaries
         sample_version = TGFSFileVersion(
@@ -509,8 +525,8 @@ class TestEdgeCases:
         # Range exactly at part boundary
         parts = list(
             TGMsgFileContentRepository._get_file_part_to_download(
-                sample_version, 1000, 2000
+                sample_version, 1000, 1999
             )
         )
         assert len(parts) == 1
-        assert parts[0] == (1002, 0, 1000)
+        assert parts[0] == (1002, 0, 999)
