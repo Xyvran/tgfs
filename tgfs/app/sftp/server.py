@@ -527,13 +527,19 @@ class TGFSSFTPServer(asyncssh.SFTPServer):
 
     @translate_errors
     async def rename(self, oldpath: bytes, newpath: bytes) -> None:
-        await self._rename(oldpath, newpath)
+        # Plain SFTP rename never replaces anything (draft-ietf-secsh-filexfer
+        # 6.5): an existing target is an error.
+        await self._rename(oldpath, newpath, overwrite=False)
 
     @translate_errors
     async def posix_rename(self, oldpath: bytes, newpath: bytes) -> None:
-        await self._rename(oldpath, newpath)
+        # posix-rename@openssh.com (and RENAME with FXR_OVERWRITE from v5 on)
+        # follows rename(2): an existing target is replaced. sshfs, rclone
+        # and editors save through it by renaming a temporary file over the
+        # original.
+        await self._rename(oldpath, newpath, overwrite=True)
 
-    async def _rename(self, oldpath: bytes, newpath: bytes) -> None:
+    async def _rename(self, oldpath: bytes, newpath: bytes, overwrite: bool) -> None:
         self._require_write()
         source, target = resolve(oldpath), resolve(newpath)
 
@@ -547,12 +553,63 @@ class TGFSSFTPServer(asyncssh.SFTPServer):
             )
 
         ops = self._ops(source)
-        try:
-            ops.cd(source.relative)
-        except FileOrDirectoryDoesNotExist:
-            await ops.mv_file(source.relative, target.relative)
-        else:
+        source_is_dir = self._is_dir(source)
+        if not source_is_dir:
+            # Raises FileOrDirectoryDoesNotExist when there is nothing to move.
+            ops.stat_file(source.relative)
+
+        if source.relative == target.relative:
+            # rename(2) onto itself succeeds without doing anything.
+            return
+        if _is_within(target.relative, source.relative):
+            raise asyncssh.SFTPFailure(
+                f"{source.as_global()} cannot be moved into itself"
+            )
+
+        target_is_dir = self._is_dir(target)
+        if target_is_dir or await self._exists(ops, target):
+            if not overwrite:
+                raise asyncssh.SFTPFileAlreadyExists(
+                    f"{target.as_global()} already exists"
+                )
+            await self._remove_rename_target(
+                ops, source, target, source_is_dir, target_is_dir
+            )
+
+        if source_is_dir:
             await ops.mv_dir(source.relative, target.relative)
+        else:
+            await ops.mv_file(source.relative, target.relative)
+
+    async def _remove_rename_target(
+        self,
+        ops: Ops,
+        source: ResolvedPath,
+        target: ResolvedPath,
+        source_is_dir: bool,
+        target_is_dir: bool,
+    ) -> None:
+        """Clear the way for a replacing rename, the way rename(2) does.
+
+        A file only replaces a file and a directory only an empty directory;
+        a non-empty directory is never removed as a side effect of a rename.
+        """
+        if source_is_dir and not target_is_dir:
+            raise asyncssh.SFTPNotADirectory(f"{target.as_global()} is not a directory")
+        if not source_is_dir and target_is_dir:
+            raise asyncssh.SFTPFileIsADirectory(f"{target.as_global()} is a directory")
+        if target_is_dir:
+            if _is_within(source.relative, target.relative):
+                # Only reachable with a non-empty target, but say why.
+                raise asyncssh.SFTPDirNotEmpty(
+                    f"{target.as_global()} contains {source.as_global()}"
+                )
+            directory = self._dir(target)
+            if directory.find_dirs() or directory.find_files():
+                raise asyncssh.SFTPDirNotEmpty(f"{target.as_global()} is not empty")
+            await ops.rm_dir(target.relative, recursive=False)
+        else:
+            await ops.rm_file(target.relative)
 
     # ------------------------------------------------------------------
     # session teardown
@@ -571,6 +628,11 @@ class TGFSSFTPServer(asyncssh.SFTPServer):
                     await handle.close()
             except Exception as ex:  # pragma: no cover - best effort cleanup
                 logger.debug("Failed to clean up an SFTP handle: %s", ex)
+
+
+def _is_within(path: str, other: str) -> bool:
+    """True when ``path`` is ``other`` or lives somewhere below it."""
+    return path == other or path.startswith(f"{other.rstrip('/')}/")
 
 
 def _pflags_from_v56(desired_access: int, flags: int) -> int:
