@@ -76,6 +76,27 @@ def create_app(
     def BAD_REQUEST(detail: str) -> Response:
         return Response(status_code=HTTPStatus.BAD_REQUEST, content=detail)
 
+    def FORBIDDEN(detail: str) -> Response:
+        return Response(status_code=HTTPStatus.FORBIDDEN, content=detail)
+
+    def PRECONDITION_FAILED(detail: str) -> Response:
+        return Response(status_code=HTTPStatus.PRECONDITION_FAILED, content=detail)
+
+    def mount_relative(server_path: str) -> str:
+        """Map a server path (e.g. from ``Destination``) onto a route path.
+
+        The routes see paths relative to where this app is mounted, while a
+        ``Destination`` header carries the whole server path.
+        """
+        base = base_path.rstrip("/")
+        if base and (server_path == base or server_path.startswith(f"{base}/")):
+            server_path = server_path[len(base) :]
+        return server_path.strip("/")
+
+    def is_within(path: str, other: str) -> bool:
+        """True when ``path`` is ``other`` or lives somewhere below it."""
+        return path == other or path.startswith(f"{other}/")
+
     app = FastAPI()
 
     @app.options(path="/{path:path}")
@@ -247,11 +268,34 @@ def create_app(
         destination = request.headers.get("Destination")
         if not destination:
             return BAD_REQUEST("Destination header is required for MOVE.")
-        if member := await get_member(path):
-            dest_path = extract_path_from_destination(destination)
-            await member.move_to(dest_path)
-            return CREATED
-        return NOT_FOUND
+        if not (member := await get_member(path)):
+            return NOT_FOUND
+
+        dest_path = extract_path_from_destination(destination)
+        source, target = path.strip("/"), mount_relative(dest_path)
+        if source == target:
+            return FORBIDDEN("Source and destination are the same.")
+        if is_within(target, source):
+            return CONFLICT(f"{path} cannot be moved into itself.")
+        if is_within(source, target):
+            # Overwriting an ancestor would delete the source along with it.
+            return CONFLICT(f"{path} cannot replace one of its own parents.")
+
+        parent_path, _ = split_path(target)
+        if not isinstance(await get_member(parent_path), Folder):
+            return CONFLICT(f"Parent folder {parent_path} does not exist.")
+
+        # RFC 4918 9.9.3: an existing destination is replaced unless the
+        # client sent "Overwrite: F". Clients that save by writing a
+        # temporary file and renaming it over the original rely on this.
+        existing = await get_member(target)
+        if existing is not None:
+            if request.headers.get("Overwrite", "T").strip().upper() == "F":
+                return PRECONDITION_FAILED(f"{target} already exists.")
+            await existing.remove()
+
+        await member.move_to(dest_path)
+        return NO_CONTENT if existing is not None else CREATED
 
     @app.api_route("/{full_path:path}", methods=["LOCK"])
     async def lock_handler(full_path: str):
