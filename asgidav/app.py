@@ -252,22 +252,16 @@ def create_app(
             return CREATED
         return CONFLICT(f"Parent folder {parent_path} does not exist.")
 
-    @app.api_route("/{path:path}", methods=["COPY"])
-    async def copy(request: Request, path: str):
-        destination = request.headers.get("Destination")
-        if not destination:
-            return BAD_REQUEST("Destination header is required for COPY.")
-        if member := await get_member(path):
-            dest_path = extract_path_from_destination(destination)
-            await member.copy_to(dest_path)
-            return CREATED
-        return NOT_FOUND
+    async def transfer(request: Request, path: str, verb: str) -> Response:
+        """Shared body of COPY and MOVE (RFC 4918 9.8 and 9.9).
 
-    @app.api_route("/{path:path}", methods=["MOVE"])
-    async def move(request: Request, path: str):
+        Both create ``Destination``, so both answer the same way when
+        something stands in its way; they only differ in what happens to
+        the source afterwards.
+        """
         destination = request.headers.get("Destination")
         if not destination:
-            return BAD_REQUEST("Destination header is required for MOVE.")
+            return BAD_REQUEST(f"Destination header is required for {verb}.")
         if not (member := await get_member(path)):
             return NOT_FOUND
 
@@ -276,7 +270,8 @@ def create_app(
         if source == target:
             return FORBIDDEN("Source and destination are the same.")
         if is_within(target, source):
-            return CONFLICT(f"{path} cannot be moved into itself.")
+            done = "moved" if verb == "MOVE" else "copied"
+            return CONFLICT(f"{path} cannot be {done} into itself.")
         if is_within(source, target):
             # Overwriting an ancestor would delete the source along with it.
             return CONFLICT(f"{path} cannot replace one of its own parents.")
@@ -285,17 +280,28 @@ def create_app(
         if not isinstance(await get_member(parent_path), Folder):
             return CONFLICT(f"Parent folder {parent_path} does not exist.")
 
-        # RFC 4918 9.9.3: an existing destination is replaced unless the
-        # client sent "Overwrite: F". Clients that save by writing a
-        # temporary file and renaming it over the original rely on this.
+        # An existing destination is replaced unless the client sent
+        # "Overwrite: F". Clients that save by writing a temporary file and
+        # renaming it over the original rely on this.
         existing = await get_member(target)
         if existing is not None:
             if request.headers.get("Overwrite", "T").strip().upper() == "F":
                 return PRECONDITION_FAILED(f"{target} already exists.")
             await existing.remove()
 
-        await member.move_to(dest_path)
+        if verb == "MOVE":
+            await member.move_to(dest_path)
+        else:
+            await member.copy_to(dest_path)
         return NO_CONTENT if existing is not None else CREATED
+
+    @app.api_route("/{path:path}", methods=["COPY"])
+    async def copy(request: Request, path: str):
+        return await transfer(request, path, "COPY")
+
+    @app.api_route("/{path:path}", methods=["MOVE"])
+    async def move(request: Request, path: str):
+        return await transfer(request, path, "MOVE")
 
     @app.api_route("/{full_path:path}", methods=["LOCK"])
     async def lock_handler(full_path: str):

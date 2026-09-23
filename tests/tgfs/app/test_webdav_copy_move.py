@@ -1,10 +1,10 @@
-"""WebDAV MOVE -- the verb behind every rename -- against a fake channel.
+"""WebDAV MOVE and COPY -- the verbs behind renaming and duplicating.
 
-The handler used to hand anything but the happy path to the ops layer and
-let it blow up, so a MOVE onto an existing name, into a missing folder or
-with "Overwrite: F" all ended in a 500. Clients that save by writing a
-temporary file and renaming it over the original (davfs2, rclone, most
-desktop file managers) never got the rename through.
+Both handlers used to hand anything but the happy path to the ops layer and
+let it blow up, so a MOVE or COPY onto an existing name, into a missing
+folder or with "Overwrite: F" all ended in a 500. Clients that save by
+writing a temporary file and renaming it over the original (davfs2, rclone,
+most desktop file managers) never got the rename through.
 
 The tests drive the real WebDAV app down to ``Ops`` / ``FileApi`` with
 message deletion switched on.
@@ -41,12 +41,22 @@ def http(client) -> TestClient:
     return TestClient(app)
 
 
-def move(http: TestClient, source: str, destination: str, **headers: str):
+def transfer(
+    http: TestClient, verb: str, source: str, destination: str, **headers: str
+):
     return http.request(
-        "MOVE",
+        verb,
         f"/test{source}",
         headers={"Destination": f"http://tgfs/webdav/test{destination}", **headers},
     )
+
+
+def move(http: TestClient, source: str, destination: str, **headers: str):
+    return transfer(http, "MOVE", source, destination, **headers)
+
+
+def copy(http: TestClient, source: str, destination: str, **headers: str):
+    return transfer(http, "COPY", source, destination, **headers)
 
 
 async def size_of(ops: Ops, path: str) -> int:
@@ -172,3 +182,89 @@ class TestRejectedMoves:
 
     def test_missing_destination_header_is_a_bad_request(self, http):
         assert http.request("MOVE", "/test/src").status_code == 400
+
+
+class TestCopy:
+    @pytest.mark.asyncio
+    async def test_copies_a_file(self, http, ops):
+        await ops.upload_from_bytes(b"x" * 11, "/src/a.txt")
+
+        resp = copy(http, "/src/a.txt", "/dest/a.txt")
+
+        assert resp.status_code == 201
+        assert await size_of(ops, "/src/a.txt") == 11
+        assert await size_of(ops, "/dest/a.txt") == 11
+
+    @pytest.mark.asyncio
+    async def test_overwrites_an_existing_file_by_default(self, http, ops, client):
+        await ops.upload_from_bytes(b"n" * 10, "/src/a.txt")
+        await ops.upload_from_bytes(b"o" * 20, "/dest/a.txt")
+        replaced = ops.stat_file("/dest/a.txt").message_id
+
+        resp = copy(http, "/src/a.txt", "/dest/a.txt")
+
+        assert resp.status_code == 204
+        assert await size_of(ops, "/dest/a.txt") == 10
+        assert len(ops.cd("/dest").find_files()) == 1
+        assert replaced not in client.channel.messages
+        # The copy is independent: the original keeps its own descriptor.
+        assert ops.stat_file("/src/a.txt").message_id != ops.stat_file(
+            "/dest/a.txt"
+        ).message_id
+
+    @pytest.mark.asyncio
+    async def test_overwrite_false_keeps_both_files(self, http, ops):
+        await ops.upload_from_bytes(b"n" * 10, "/src/a.txt")
+        await ops.upload_from_bytes(b"o" * 20, "/dest/a.txt")
+
+        resp = copy(http, "/src/a.txt", "/dest/a.txt", Overwrite="F")
+
+        assert resp.status_code == 412
+        assert await size_of(ops, "/dest/a.txt") == 20
+
+    @pytest.mark.asyncio
+    async def test_overwrites_an_existing_folder(self, http, ops):
+        await ops.mkdir("/src/sub", False)
+        await ops.upload_from_bytes(b"x" * 3, "/src/sub/new.txt")
+        await ops.mkdir("/dest/sub", False)
+        await ops.upload_from_bytes(b"x" * 5, "/dest/sub/old.txt")
+
+        resp = copy(http, "/src/sub", "/dest/sub")
+
+        assert resp.status_code == 204
+        assert [f.name for f in ops.cd("/dest/sub").find_files()] == ["new.txt"]
+        assert [f.name for f in ops.cd("/src/sub").find_files()] == ["new.txt"]
+
+    @pytest.mark.asyncio
+    async def test_missing_parent_is_a_conflict(self, http, ops):
+        await ops.upload_from_bytes(b"x", "/src/a.txt")
+
+        assert copy(http, "/src/a.txt", "/nope/a.txt").status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_copying_onto_itself_is_forbidden(self, http, ops):
+        await ops.upload_from_bytes(b"x", "/src/a.txt")
+
+        assert copy(http, "/src/a.txt", "/src/a.txt").status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_copying_a_folder_into_itself_is_a_conflict(self, http, ops):
+        await ops.mkdir("/src/sub", False)
+
+        resp = copy(http, "/src", "/src/sub/src")
+
+        assert resp.status_code == 409
+        assert [d.name for d in ops.cd("/src/sub").find_dirs()] == []
+
+    @pytest.mark.asyncio
+    async def test_replacing_a_parent_does_not_delete_the_source(self, http, ops):
+        await ops.mkdir("/src/sub", False)
+        await ops.upload_from_bytes(b"x" * 9, "/src/sub/a.txt")
+
+        resp = copy(http, "/src/sub/a.txt", "/src")
+
+        assert resp.status_code == 409
+        assert await size_of(ops, "/src/sub/a.txt") == 9
+
+    def test_missing_source_is_not_found(self, http):
+        assert copy(http, "/src/none.txt", "/dest/none.txt").status_code == 404
