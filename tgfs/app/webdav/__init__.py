@@ -19,7 +19,11 @@ async def _get_member(path: str, clients: Clients) -> Optional[Member]:
 
     client_name, sub_path = split_global_path(path)
 
-    root = Folder("/", clients[client_name])
+    # Anything outside a configured file system (a browser asking for
+    # /webdav/favicon.ico, a typo) is simply not found.
+    if (client := clients.get(client_name)) is None:
+        return None
+    root = Folder("/", client)
 
     if res := await root.member(sub_path.lstrip("/")):
         return res

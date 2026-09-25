@@ -1,3 +1,4 @@
+import datetime
 import os.path
 from contextlib import AbstractAsyncContextManager, nullcontext
 from typing import AsyncIterator
@@ -126,6 +127,12 @@ class Ops:
                     # If the directory does not exist, create it
                     d = await self._client.dir_api.create(part, d)
         return await self._client.dir_api.create(basename, d)
+
+    async def set_last_modified(
+        self, path: str, when: datetime.datetime
+    ) -> TGFSFileDesc:
+        self._validate_path(path)
+        return await self._client.file_api.set_last_modified(self.stat_file(path), when)
 
     async def touch(self, path: str) -> None:
         self._validate_path(path)

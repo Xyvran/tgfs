@@ -183,6 +183,37 @@ class TGFSFileDesc:
         version = TGFSFileVersion.empty()
         self.add_version(version)
 
+    def set_last_modified(self, when: datetime.datetime) -> TGFSFileVersion:
+        """Date the latest version ``when``, the way a client's mtime asks.
+
+        Versions are ordered by their timestamp and the newest one is the
+        content served, so the latest version cannot be dated at or before
+        another version: that would silently promote the older content.
+        Such a request raises ``ValueError`` and changes nothing.
+        """
+        if self.latest_version_id == INVALID_VERSION_ID:
+            raise ValueError(f"{self.name} has no version to date")
+        latest = self.versions[self.latest_version_id]
+        # Compared as serialized (milliseconds), which is what decides the
+        # order once the descriptor is read back.
+        newest_other = max(
+            (
+                version.updated_at_timestamp
+                for version_id, version in self.versions.items()
+                if version_id != self.latest_version_id
+            ),
+            default=None,
+        )
+        if newest_other is not None and ts(when) <= newest_other:
+            raise ValueError(
+                f"{self.name}: a modification time of {when.isoformat()} would "
+                f"date the latest version before an older version"
+            )
+        latest.updated_at = when
+        if ts(when) < ts(self.created_at):
+            self.created_at = when
+        return latest
+
     def add_version_from_sent_file_message(self, *msg: SentFileMessage):
         version = TGFSFileVersion.from_sent_file_message(*msg)
         self.add_version(version)

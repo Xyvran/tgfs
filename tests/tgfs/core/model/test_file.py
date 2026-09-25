@@ -558,3 +558,52 @@ class TestTGFSFileDesc:
 
         with pytest.raises(ValueError, match="Version v1 not found in file test.txt"):
             file_desc.delete_version("v1")
+
+
+class TestSetLastModified:
+    @staticmethod
+    def version(when: datetime.datetime, message_id: int) -> TGFSFileVersion:
+        return TGFSFileVersion(
+            id=f"v{message_id}", updated_at=when, message_ids=[message_id]
+        )
+
+    def test_dates_the_latest_version(self):
+        fd = TGFSFileDesc(name="a.txt")
+        fd.add_version(self.version(datetime.datetime(2026, 9, 25, 20, 12), 1))
+        when = datetime.datetime(2000, 1, 1)
+
+        latest = fd.set_last_modified(when)
+
+        assert latest.id == "v1"
+        assert fd.get_latest_version().updated_at == when
+        assert fd.updated_at_timestamp == ts(when)
+        assert fd.created_at == when
+
+    def test_keeps_the_latest_version_the_latest(self):
+        fd = TGFSFileDesc(name="a.txt")
+        fd.add_version(self.version(datetime.datetime(2026, 1, 1), 1))
+        fd.add_version(self.version(datetime.datetime(2026, 6, 1), 2))
+
+        with pytest.raises(ValueError, match="older version"):
+            fd.set_last_modified(datetime.datetime(2025, 12, 31))
+        with pytest.raises(ValueError, match="older version"):
+            fd.set_last_modified(datetime.datetime(2026, 1, 1))
+
+        assert fd.latest_version_id == "v2"
+        assert fd.get_latest_version().updated_at == datetime.datetime(2026, 6, 1)
+
+    def test_after_an_older_version_is_fine(self):
+        fd = TGFSFileDesc(name="a.txt")
+        fd.add_version(self.version(datetime.datetime(2026, 1, 1), 1))
+        fd.add_version(self.version(datetime.datetime(2026, 6, 1), 2))
+        when = datetime.datetime(2026, 1, 1, 0, 0, 1)
+
+        fd.set_last_modified(when)
+
+        reloaded = TGFSFileDesc.from_dict(json.loads(fd.to_json()), "a.txt")
+        assert reloaded.latest_version_id == "v2"
+        assert reloaded.get_latest_version().updated_at_timestamp == ts(when)
+
+    def test_a_file_without_versions_cannot_be_dated(self):
+        with pytest.raises(ValueError, match="no version"):
+            TGFSFileDesc.empty("a.txt").set_last_modified(datetime.datetime(2000, 1, 1))

@@ -21,7 +21,14 @@ class MockResource(Resource):
         return 1609459200000
 
     async def last_modified(self) -> int:
-        return 1609545600000
+        return self._last_modified
+
+    _last_modified = 1609545600000
+
+    async def set_last_modified(self, timestamp: int) -> None:
+        if timestamp < 0:
+            raise ValueError("before the epoch")
+        self._last_modified = timestamp
 
     async def get_content(self, begin: int = 0, end: int = -1) -> AsyncIterator[bytes]:
         async def dummy_iterator():

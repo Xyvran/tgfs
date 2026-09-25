@@ -31,6 +31,8 @@ command line and `sshfs` work against the SFTP interface as well.
 
 ## Features
 * Upload and download files to/from a private Telegram channel via WebDAV
+* Uploads keep their modification time: clients that set it after the
+  upload (CarotDAV, Windows Explorer, WebDAV sync tools) are honoured via PROPPATCH
 * **Optional SFTP interface** serving the same tree next to WebDAV (see below)
 * Group files on Telegram channels into folders
 * Infinite versioning of files and folders (Folder versioning is only available when Metadata is maintained on Github repository)
@@ -102,7 +104,8 @@ upload never truncates an existing file.
 cannot be appended to or partially updated (every write stores a new
 version), moving between two channels is refused, and there are no symlinks
 or real POSIX permissions — `chmod`, `chown` and `touch -t` are accepted
-and ignored so clients like `rsync` do not abort.
+and ignored so clients like `rsync` do not abort. (Over WebDAV, a
+modification time set with PROPPATCH is stored, see above.)
 
 ## Channel redundancy
 

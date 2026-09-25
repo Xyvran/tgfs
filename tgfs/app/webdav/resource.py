@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import os.path
 from typing import Optional
 
@@ -64,6 +65,13 @@ class Resource(_Resource):
     async def overwrite(self, content: FileContent, size: int) -> None:
         self.__fs_cache.reset(self.__relative_path)
         await self.__ops.upload_from_stream(content, size, self.__relative_path)
+
+    async def set_last_modified(self, timestamp: int) -> None:
+        # Naive local time, as every other version timestamp in the model.
+        when = datetime.datetime.fromtimestamp(timestamp / 1000)
+        self.__fs_cache.reset(self.__relative_path)
+        self.__fd_value = None
+        await self.__ops.set_last_modified(self.__relative_path, when)
 
     async def remove(self) -> None:
         self.__fs_cache.reset_parent(self.__relative_path)

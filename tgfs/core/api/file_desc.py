@@ -1,3 +1,4 @@
+import datetime
 from typing import List, Optional
 
 from tgfs.core.model import TGFSFileDesc, TGFSFileRef, TGFSFileVersion
@@ -80,6 +81,14 @@ class FileDescApi:
             fv.set_invalid()
             fd.update_version(version_id, fv)
 
+        return await self.__fd_repo.save(fd, fr)
+
+    async def set_last_modified(
+        self, fr: TGFSFileRef, when: datetime.datetime
+    ) -> FDRepositoryResp:
+        """Re-date the latest version and write the descriptor back."""
+        fd = await self.get_file_desc(fr)
+        fd.set_last_modified(when)
         return await self.__fd_repo.save(fd, fr)
 
     async def delete_file_version(

@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from .folder import Folder
 from .member import Member
-from .reqres import PropfindRequest, propfind
+from .reqres import PropfindRequest, ProppatchRequest, propfind, proppatch
 from .resource import Resource
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,7 @@ METHODS = frozenset(
         "DELETE",
         "OPTIONS",
         "PROPFIND",
+        "PROPPATCH",
         "COPY",
         "MOVE",
         "MKCOL",
@@ -115,6 +116,29 @@ def create_app(
         r = await PropfindRequest.from_request(request)
         if member := await get_member(path):
             resp = await propfind((member,), r.depth, r.props, base_path)
+            return Response(
+                resp,
+                status_code=HTTPStatus.MULTI_STATUS,
+                media_type="application/xml; charset=utf-8",
+                headers=common_headers
+                | {"Content-Type": "application/xml; charset=utf-8"},
+            )
+        return NOT_FOUND
+
+    @app.api_route("/{path:path}", methods=["PROPPATCH"])
+    async def handle_proppatch(request: Request, path: str):
+        """Set properties, in practice the modification time after an upload.
+
+        Clients such as CarotDAV send one after every PUT to carry the
+        source file's date over; without this verb they report the whole
+        upload as failed although the bytes are already stored.
+        """
+        try:
+            r = await ProppatchRequest.from_request(request)
+        except ValueError as ex:
+            return BAD_REQUEST(f"Malformed PROPPATCH body: {ex}")
+        if member := await get_member(path):
+            resp = await proppatch(member, r.updates, base_path)
             return Response(
                 resp,
                 status_code=HTTPStatus.MULTI_STATUS,

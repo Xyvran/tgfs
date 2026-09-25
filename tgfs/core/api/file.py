@@ -1,3 +1,4 @@
+import datetime
 import logging
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 from uuid import uuid4 as uuid
@@ -284,6 +285,18 @@ class FileApi:
             )
         else:
             resp = await self._file_desc_api.append_file_version(file_msg, fr)
+        await self._sync_file_ref(fr, resp)
+        return resp.fd
+
+    async def set_last_modified(
+        self, fr: TGFSFileRef, when: datetime.datetime
+    ) -> TGFSFileDesc:
+        """Give ``fr``'s latest version the modification time ``when``.
+
+        WebDAV PROPPATCH after an upload; the descriptor message changes,
+        the metadata only when the descriptor moved.
+        """
+        resp = await self._file_desc_api.set_last_modified(fr, when)
         await self._sync_file_ref(fr, resp)
         return resp.fd
 

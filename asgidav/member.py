@@ -65,6 +65,17 @@ class Member(ABC):
     async def move_to(self, destination: str) -> None:
         raise NotImplementedError
 
+    async def set_last_modified(self, timestamp: int) -> None:
+        """Set the modification time to ``timestamp`` (Unix milliseconds).
+
+        Clients send it with PROPPATCH after an upload so the copy keeps
+        the source's date. A member that stores no timestamp of its own
+        leaves this unimplemented and the property is reported as
+        forbidden; one that cannot accept this particular value raises
+        ``ValueError`` and the property is reported as a conflict.
+        """
+        raise NotImplementedError
+
     async def get_properties(self) -> Properties:
         getlastmodified, creationdate, displayname, getcontenttype = (
             await asyncio.gather(
