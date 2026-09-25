@@ -224,7 +224,15 @@ def create_app(
         content_length = request.headers.get("Content-Length", "0")
         size = int(content_length)
         if not (member := await get_member(path)):
-            member = await (await root()).create_empty_resource(path)
+            parent_path, _ = split_path(path)
+            if not isinstance(await get_member(parent_path), Folder):
+                # RFC 4918 9.7.1: a PUT does not create the collections on
+                # the way to the resource.
+                return CONFLICT(f"Parent folder {parent_path} does not exist.")
+            try:
+                member = await (await root()).create_empty_resource(path)
+            except NotImplementedError as e:
+                return FORBIDDEN(f"Cannot create {path}: {e}")
         if isinstance(member, Resource):
             if size > 0:
                 await member.overwrite(request.stream(), size=size)
@@ -248,7 +256,12 @@ def create_app(
                 if isinstance(member, Folder):
                     return CREATED
                 return CONFLICT(f"Resource {path} is a file.")
-            await parent.create_folder(folder_name)
+            try:
+                await parent.create_folder(folder_name)
+            except NotImplementedError as e:
+                # RFC 4918 9.3.1: a collection that refuses new members
+                # answers 403, not a server error.
+                return FORBIDDEN(f"Cannot create {path}: {e}")
             return CREATED
         return CONFLICT(f"Parent folder {parent_path} does not exist.")
 

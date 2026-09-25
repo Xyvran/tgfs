@@ -19,6 +19,12 @@ async def _get_member(path: str, clients: Clients) -> Optional[Member]:
 
     client_name, sub_path = split_global_path(path)
 
+    # The first segment has to name a configured client. Anything else is a path
+    # that does not exist, and the caller expects None for that -- not a
+    # KeyError, which would leave the request answered with a 500.
+    if client_name not in clients:
+        return None
+
     root = Folder("/", clients[client_name])
 
     if res := await root.member(sub_path.lstrip("/")):

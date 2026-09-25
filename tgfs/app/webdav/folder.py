@@ -1,4 +1,4 @@
-from typing import Mapping, Tuple
+from typing import Mapping, Optional, Tuple
 
 from asgidav.folder import Folder as _Folder
 from asgidav.member import Member
@@ -102,6 +102,10 @@ class Folder(_Folder):
         )
 
 
+# The top level is the list of configured clients, not a writable directory.
+_NO_NEW_MEMBERS = "the top level only holds the configured clients"
+
+
 class RootFolder(_Folder):
     def __init__(self, sub_folders: Mapping[str, Folder]):
         super().__init__("/")
@@ -109,14 +113,16 @@ class RootFolder(_Folder):
         self._members = sub_folders
         self._member_names = frozenset(sub_folders.keys())
 
-    def _route(self, path: str) -> Tuple[Folder, str]:
+    def _route(self, path: str) -> Tuple[Optional[Folder], str]:
         """
         "a/b/c" -> (self._members["a"], "b/c")
+
+        The first segment names a configured client. A name that is not
+        configured is a path that does not exist, not an error to raise, so
+        this reports the absence and lets the caller answer 404 or 409.
         """
-        parts = path.split("/", 1)
-        if len(parts) == 1:
-            return self._members[parts[0]], ""
-        return self._members[parts[0]], parts[1]
+        name, _, sub_path = path.partition("/")
+        return self._members.get(name), sub_path
 
     async def display_name(self) -> str:
         return "root"
@@ -128,11 +134,18 @@ class RootFolder(_Folder):
         if path == "":
             return self
         folder, sub_path = self._route(path)
+        if folder is None:
+            return None
         return await folder.member(sub_path)
 
     async def create_empty_resource(self, path: str) -> Member:
         folder, sub_path = self._route(path)
+        if folder is None:
+            raise NotImplementedError(_NO_NEW_MEMBERS)
         return await folder.create_empty_resource(sub_path)
+
+    async def create_folder(self, name: str) -> Folder:
+        raise NotImplementedError(_NO_NEW_MEMBERS)
 
     async def creation_date(self) -> int:
         return ts(FIRST_DAY_OF_EPOCH)
