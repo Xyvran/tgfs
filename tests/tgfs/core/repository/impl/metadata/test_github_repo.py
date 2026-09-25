@@ -1,4 +1,5 @@
 import datetime
+import json
 
 import pytest
 from unittest.mock import Mock, MagicMock, patch
@@ -6,14 +7,56 @@ from typing import List
 from github import Github
 from github.Repository import Repository
 from github.ContentFile import ContentFile
+from github.GitTreeElement import GitTreeElement
 
 from tgfs.config import GithubRepoConfig
 from tgfs.core.model import TGFSDirectory, TGFSFileRef, TGFSMetadata
 from tgfs.core.repository.impl.metadata.github_repo import GithubRepoMetadataRepository
+from tgfs.core.repository.impl.metadata.github_repo.dir_timestamps import (
+    CACHE_VERSION,
+    DirTimestampStore,
+)
 from tgfs.core.repository.impl.metadata.github_repo.gh_directory import (
     GithubConfig,
     GithubDirectory,
 )
+
+
+def mock_tree(repo, paths, truncated=False):
+    """Make ``get_git_tree`` answer with ``paths``; a trailing ``/`` is a subtree.
+
+    The load reads the whole repo in one recursive tree call, so this is what
+    the structure tests below have to stand in for.
+    """
+    entries = []
+    for path in paths:
+        entry = Mock(spec=GitTreeElement)
+        entry.path = path.rstrip("/")
+        entry.type = "tree" if path.endswith("/") else "blob"
+        entries.append(entry)
+
+    tree = Mock()
+    tree.tree = entries
+    tree.truncated = truncated
+    repo.get_git_tree.return_value = tree
+    return tree
+
+
+@pytest.fixture(autouse=True)
+def stub_timestamp_store():
+    """Keep the date cache out of the structure tests.
+
+    A real store would start background workers against the mocked repo and
+    write a cache file into the caller's home directory. Its own behaviour is
+    covered in ``test_dir_timestamps.py``.
+    """
+    with patch(
+        "tgfs.core.repository.impl.metadata.github_repo.DirTimestampStore"
+    ) as store_cls:
+        store = Mock(spec=DirTimestampStore)
+        store.get.return_value = None  # every lookup misses
+        store_cls.return_value = store
+        yield store
 
 
 # Global fixtures for all test classes
@@ -100,7 +143,7 @@ class TestGithubRepoMetadataRepository:
         mock_github_class.return_value = mock_github_instance
 
         # Mock the repo contents
-        mock_repo.get_contents.return_value = []
+        mock_tree(mock_repo, [])
 
         repository = GithubRepoMetadataRepository(mock_github_config)
 
@@ -127,7 +170,7 @@ class TestGithubRepoMetadataRepository:
         pushed = datetime.datetime(2026, 6, 1, 18, 0, tzinfo=datetime.timezone.utc)
         mock_repo.created_at = created
         mock_repo.pushed_at = pushed
-        mock_repo.get_contents.return_value = []
+        mock_tree(mock_repo, [])
 
         repository = GithubRepoMetadataRepository(mock_github_config)
         root_dir = repository._build_directory_structure()
@@ -145,27 +188,8 @@ class TestGithubRepoMetadataRepository:
         mock_github_instance.get_repo.return_value = mock_repo
         mock_github_class.return_value = mock_github_instance
 
-        # Mock content structure: root -> [file1.123, subdir] -> [file2.456]
-        file1 = Mock(spec=ContentFile)
-        file1.name = "document.123"
-        file1.type = "file"
-        file1.path = "document.123"
-
-        subdir = Mock(spec=ContentFile)
-        subdir.name = "subdir"
-        subdir.type = "dir"
-        subdir.path = "subdir"
-
-        file2 = Mock(spec=ContentFile)
-        file2.name = "image.456"
-        file2.type = "file"
-        file2.path = "subdir/image.456"
-
-        # Set up mock returns
-        mock_repo.get_contents.side_effect = [
-            [file1, subdir],  # root contents
-            [file2],  # subdir contents
-        ]
+        # root -> [document.123, subdir] -> [image.456]
+        mock_tree(mock_repo, ["document.123", "subdir/", "subdir/image.456"])
 
         repository = GithubRepoMetadataRepository(mock_github_config)
         root_dir = repository._build_directory_structure()
@@ -186,39 +210,102 @@ class TestGithubRepoMetadataRepository:
         assert sub_dir.files[0].name == "image"
         assert sub_dir.files[0].message_id == 456
 
+        # The whole repo came from one recursive tree call, not one call per
+        # directory -- that is the point of the change.
+        mock_repo.get_git_tree.assert_called_once_with("main", recursive=True)
+        mock_repo.get_contents.assert_not_called()
+
     @patch("tgfs.core.repository.impl.metadata.github_repo.Github")
-    def test_build_directory_structure_restores_timestamps_from_commits(
+    def test_tree_walk_creates_missing_parent_directories(
         self, mock_github_class, mock_github_config
     ):
-        """Directory created/modified dates are recovered from git history."""
+        """A blob can arrive before the subtrees above it exist."""
         mock_github_instance = Mock(spec=Github)
         mock_repo = Mock(spec=Repository)
         mock_github_instance.get_repo.return_value = mock_repo
         mock_github_class.return_value = mock_github_instance
 
-        subdir = Mock(spec=ContentFile)
-        subdir.name = "Serien"
-        subdir.type = "dir"
-        subdir.path = "Serien"
-
-        mock_repo.get_contents.side_effect = [
-            [subdir],  # root contents
-            [],  # subdir contents
-        ]
-
-        commit_date = datetime.datetime(
-            2024, 3, 1, 12, 0, tzinfo=datetime.timezone.utc
-        )
-        commit = Mock()
-        commit.commit.committer.date = commit_date
-        mock_repo.get_commits.return_value = [commit]
+        # Only the blob is listed: both directories have to be inferred from
+        # its path, and in this order.
+        mock_tree(mock_repo, ["Serien/Heat/episode.9"])
 
         repository = GithubRepoMetadataRepository(mock_github_config)
         root_dir = repository._build_directory_structure()
 
+        assert [c.name for c in root_dir.children] == ["Serien"]
+        serien = root_dir.children[0]
+        assert [c.name for c in serien.children] == ["Heat"]
+        heat = serien.children[0]
+        assert [(f.name, f.message_id) for f in heat.files] == [("episode", 9)]
+
+    @patch("tgfs.core.repository.impl.metadata.github_repo.Github")
+    def test_tree_entries_are_not_duplicated(
+        self, mock_github_class, mock_github_config
+    ):
+        """A subtree listed after its children is still created only once."""
+        mock_github_instance = Mock(spec=Github)
+        mock_repo = Mock(spec=Repository)
+        mock_github_instance.get_repo.return_value = mock_repo
+        mock_github_class.return_value = mock_github_instance
+
+        mock_tree(mock_repo, ["Serien/Heat/episode.9", "Serien/", "Serien/Heat/"])
+
+        repository = GithubRepoMetadataRepository(mock_github_config)
+        root_dir = repository._build_directory_structure()
+
+        assert len(root_dir.children) == 1
+        assert len(root_dir.children[0].children) == 1
+
+    @patch("tgfs.core.repository.impl.metadata.github_repo.Github")
+    def test_directory_timestamps_come_from_the_cache(
+        self, mock_github_class, mock_github_config, tmp_path
+    ):
+        """A warm cache dates every directory without touching git history."""
+        mock_github_instance = Mock(spec=Github)
+        mock_repo = Mock(spec=Repository)
+        mock_repo.full_name = "owner/test-repo"
+        mock_github_instance.get_repo.return_value = mock_repo
+        mock_github_class.return_value = mock_github_instance
+
+        mock_tree(mock_repo, ["Serien/", "Serien/.gitkeep"])
+
+        created = datetime.datetime(2024, 3, 1, 12, 0, tzinfo=datetime.timezone.utc)
+        modified = datetime.datetime(2025, 7, 4, 8, 30, tzinfo=datetime.timezone.utc)
+        cache = tmp_path / "dir-timestamps.json"
+        cache.write_text(
+            json.dumps(
+                {
+                    "version": CACHE_VERSION,
+                    "repo": "owner/test-repo",
+                    "branch": "main",
+                    "head": "cafe1234",
+                    "paths": {
+                        "Serien": {
+                            "created": created.isoformat(),
+                            "modified": modified.isoformat(),
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        # The head has not moved, so the cache is taken as-is.
+        mock_repo.get_branch.return_value.commit.sha = "cafe1234"
+
+        repository = GithubRepoMetadataRepository(mock_github_config)
+        store = DirTimestampStore(repo=mock_repo, branch="main", path=str(cache))
+        repository._timestamps = store
+        repository._ghc.timestamps = store
+        store.load()
+
+        root_dir = repository._build_directory_structure()
+
         sub_dir = root_dir.children[0]
-        assert sub_dir.created_at == commit_date
-        assert sub_dir.modified_at == commit_date
+        assert sub_dir.created_at == created
+        assert sub_dir.modified_at == modified
+        # No git history was read and no diff was needed to get there.
+        mock_repo.get_commits.assert_not_called()
+        mock_repo.compare.assert_not_called()
 
     @patch("tgfs.core.repository.impl.metadata.github_repo.Github")
     def test_reads_encrypted_and_legacy_names(
@@ -240,19 +327,14 @@ class TestGithubRepoMetadataRepository:
         enc_dir = encrypt_path_name(key, "Filme")
         enc_file = encrypt_path_name(key, "movie.mp4")
 
-        d = Mock(spec=ContentFile)
-        d.name, d.type, d.path = enc_dir, "dir", enc_dir
-        legacy = Mock(spec=ContentFile)
-        legacy.name, legacy.type, legacy.path = "legacy.7", "file", "legacy.7"
-        inner = Mock(spec=ContentFile)
-        inner.name = f"{enc_file}.39"
-        inner.type = "file"
-        inner.path = f"{enc_dir}/{enc_file}.39"
-
-        mock_repo.get_contents.side_effect = [
-            [d, legacy],  # root
-            [inner],  # inside Filme
-        ]
+        mock_tree(
+            mock_repo,
+            [
+                f"{enc_dir}/",
+                "legacy.7",
+                f"{enc_dir}/{enc_file}.39",
+            ],
+        )
 
         repository = GithubRepoMetadataRepository(
             mock_github_config, name_key=key
@@ -278,17 +360,10 @@ class TestGithubRepoMetadataRepository:
         mock_github_instance.get_repo.return_value = mock_repo
         mock_github_class.return_value = mock_github_instance
 
-        gitkeep_file = Mock(spec=ContentFile)
-        gitkeep_file.name = ".gitkeep"
-        gitkeep_file.type = "file"
-        gitkeep_file.path = ".gitkeep"
-
-        regular_file = Mock(spec=ContentFile)
-        regular_file.name = "test.789"
-        regular_file.type = "file"
-        regular_file.path = "test.789"
-
-        mock_repo.get_contents.return_value = [gitkeep_file, regular_file]
+        mock_tree(
+            mock_repo,
+            [".gitkeep", "test.789", "subdir/", "subdir/.gitkeep"],
+        )
 
         repository = GithubRepoMetadataRepository(mock_github_config)
         root_dir = repository._build_directory_structure()
@@ -297,6 +372,9 @@ class TestGithubRepoMetadataRepository:
         assert len(root_dir.files) == 1
         assert root_dir.files[0].name == "test"
         assert root_dir.files[0].message_id == 789
+        # The placeholder inside the subdirectory is dropped as well.
+        assert len(root_dir.children) == 1
+        assert root_dir.children[0].files == []
 
     @patch("tgfs.core.repository.impl.metadata.github_repo.Github")
     @patch("tgfs.core.repository.impl.metadata.github_repo.logger")
@@ -309,12 +387,7 @@ class TestGithubRepoMetadataRepository:
         mock_github_instance.get_repo.return_value = mock_repo
         mock_github_class.return_value = mock_github_instance
 
-        invalid_file = Mock(spec=ContentFile)
-        invalid_file.name = "invalid_filename_no_message_id"
-        invalid_file.type = "file"
-        invalid_file.path = "invalid_filename_no_message_id"
-
-        mock_repo.get_contents.return_value = [invalid_file]
+        mock_tree(mock_repo, ["invalid_filename_no_message_id"])
 
         repository = GithubRepoMetadataRepository(mock_github_config)
         root_dir = repository._build_directory_structure()
@@ -339,7 +412,8 @@ class TestGithubRepoMetadataRepository:
         mock_github_instance.get_repo.return_value = mock_repo
         mock_github_class.return_value = mock_github_instance
 
-        # Make get_contents raise an exception
+        # Both the tree call and the walk it falls back to are refused
+        mock_repo.get_git_tree.side_effect = Exception("API rate limit exceeded")
         mock_repo.get_contents.side_effect = Exception("API rate limit exceeded")
 
         repository = GithubRepoMetadataRepository(mock_github_config)
@@ -352,6 +426,54 @@ class TestGithubRepoMetadataRepository:
 
         # Should log error
         mock_logger.error.assert_called_once()
+
+    @patch("tgfs.core.repository.impl.metadata.github_repo.Github")
+    def test_unreadable_tree_falls_back_to_the_directory_walk(
+        self, mock_github_class, mock_github_config
+    ):
+        """A failing tree call must not cost the filesystem its contents."""
+        mock_github_instance = Mock(spec=Github)
+        mock_repo = Mock(spec=Repository)
+        mock_github_instance.get_repo.return_value = mock_repo
+        mock_github_class.return_value = mock_github_instance
+
+        mock_repo.get_git_tree.side_effect = Exception("server error")
+
+        subdir = Mock(spec=ContentFile)
+        subdir.name, subdir.type, subdir.path = "Serien", "dir", "Serien"
+        inner = Mock(spec=ContentFile)
+        inner.name, inner.type, inner.path = "ep.5", "file", "Serien/ep.5"
+        mock_repo.get_contents.side_effect = [[subdir], [inner]]
+
+        repository = GithubRepoMetadataRepository(mock_github_config)
+        root_dir = repository._build_directory_structure()
+
+        assert [c.name for c in root_dir.children] == ["Serien"]
+        assert [f.name for f in root_dir.children[0].files] == ["ep"]
+
+    @patch("tgfs.core.repository.impl.metadata.github_repo.Github")
+    def test_truncated_tree_falls_back_to_the_directory_walk(
+        self, mock_github_class, mock_github_config
+    ):
+        """A truncated tree would hide whole folders, so it is refused."""
+        mock_github_instance = Mock(spec=Github)
+        mock_repo = Mock(spec=Repository)
+        mock_github_instance.get_repo.return_value = mock_repo
+        mock_github_class.return_value = mock_github_instance
+
+        # The tree lists one directory but is incomplete; the walk sees two.
+        mock_tree(mock_repo, ["Serien/"], truncated=True)
+
+        first = Mock(spec=ContentFile)
+        first.name, first.type, first.path = "Serien", "dir", "Serien"
+        second = Mock(spec=ContentFile)
+        second.name, second.type, second.path = "Filme", "dir", "Filme"
+        mock_repo.get_contents.side_effect = [[first, second], [], []]
+
+        repository = GithubRepoMetadataRepository(mock_github_config)
+        root_dir = repository._build_directory_structure()
+
+        assert [c.name for c in root_dir.children] == ["Serien", "Filme"]
 
     @patch("tgfs.core.repository.impl.metadata.github_repo.Github")
     @patch("tgfs.core.repository.impl.metadata.github_repo.logger")
@@ -369,7 +491,8 @@ class TestGithubRepoMetadataRepository:
         subdir.type = "dir"
         subdir.path = "protected_dir"
 
-        # Root contents succeed, subdirectory access fails
+        # No usable tree, so the walk runs: root succeeds, the subdir fails
+        mock_repo.get_git_tree.side_effect = Exception("server error")
         mock_repo.get_contents.side_effect = [
             [subdir],  # root contents
             Exception("Access denied"),  # subdirectory contents
@@ -384,9 +507,8 @@ class TestGithubRepoMetadataRepository:
         assert len(root_dir.children[0].files) == 0
 
         # Should log warning
-        mock_logger.warning.assert_called_once()
-        warning_call = mock_logger.warning.call_args[0][0]
-        assert "Failed to construct directory protected_dir" in warning_call
+        warnings = [call[0][0] for call in mock_logger.warning.call_args_list]
+        assert any("Failed to construct directory protected_dir" in w for w in warnings)
 
     @pytest.mark.asyncio
     async def test_push_method(self, mock_github_config):
@@ -824,7 +946,7 @@ class TestIntegrationScenarios:
         mock_github_class.return_value = mock_github_instance
 
         # Mock initial empty repository
-        mock_repo.get_contents.return_value = []
+        mock_tree(mock_repo, [])
 
         repository = GithubRepoMetadataRepository(mock_github_config)
         metadata = await repository.get()
@@ -863,39 +985,17 @@ class TestIntegrationScenarios:
         mock_github_instance.get_repo.return_value = mock_repo
         mock_github_class.return_value = mock_github_instance
 
-        # Create complex structure: root/docs/2023/reports/ with files
-        docs_dir = Mock(spec=ContentFile)
-        docs_dir.name = "docs"
-        docs_dir.type = "dir"
-        docs_dir.path = "docs"
-
-        year_dir = Mock(spec=ContentFile)
-        year_dir.name = "2023"
-        year_dir.type = "dir"
-        year_dir.path = "docs/2023"
-
-        reports_dir = Mock(spec=ContentFile)
-        reports_dir.name = "reports"
-        reports_dir.type = "dir"
-        reports_dir.path = "docs/2023/reports"
-
-        file1 = Mock(spec=ContentFile)
-        file1.name = "q1_report.111"
-        file1.type = "file"
-        file1.path = "docs/2023/reports/q1_report.111"
-
-        file2 = Mock(spec=ContentFile)
-        file2.name = "q2_report.222"
-        file2.type = "file"
-        file2.path = "docs/2023/reports/q2_report.222"
-
-        # Set up mock returns
-        mock_repo.get_contents.side_effect = [
-            [docs_dir],  # root
-            [year_dir],  # docs/
-            [reports_dir],  # docs/2023/
-            [file1, file2],  # docs/2023/reports/
-        ]
+        # Complex structure: root/docs/2023/reports/ with files
+        mock_tree(
+            mock_repo,
+            [
+                "docs/",
+                "docs/2023/",
+                "docs/2023/reports/",
+                "docs/2023/reports/q1_report.111",
+                "docs/2023/reports/q2_report.222",
+            ],
+        )
 
         repository = GithubRepoMetadataRepository(mock_github_config)
         root_dir = repository._build_directory_structure()
@@ -944,12 +1044,7 @@ class TestErrorHandling:
 
     def test_file_ref_with_non_numeric_message_id(self, mock_ghc):
         """Test error handling for non-numeric message IDs in filenames"""
-        mock_content = Mock(spec=ContentFile)
-        mock_content.name = "test.abc"  # Non-numeric message ID
-        mock_content.type = "file"
-        mock_content.path = "test.abc"
-
-        mock_ghc.repo.get_contents.return_value = [mock_content]
+        mock_tree(mock_ghc.repo, ["test.abc"])  # Non-numeric message ID
 
         with patch("tgfs.core.repository.impl.metadata.github_repo.Github"):
             repository = GithubRepoMetadataRepository(
@@ -974,7 +1069,7 @@ class TestEdgeCases:
 
     def test_empty_repository(self, mock_ghc):
         """Test handling of completely empty repository"""
-        mock_ghc.repo.get_contents.return_value = []
+        mock_tree(mock_ghc.repo, [])
 
         with patch("tgfs.core.repository.impl.metadata.github_repo.Github"):
             repository = GithubRepoMetadataRepository(
@@ -990,25 +1085,10 @@ class TestEdgeCases:
 
     def test_directory_with_only_gitkeep(self, mock_ghc):
         """Test directory containing only .gitkeep files"""
-        gitkeep1 = Mock(spec=ContentFile)
-        gitkeep1.name = ".gitkeep"
-        gitkeep1.type = "file"
-        gitkeep1.path = ".gitkeep"
-
-        gitkeep2 = Mock(spec=ContentFile)
-        gitkeep2.name = ".gitkeep"
-        gitkeep2.type = "file"
-        gitkeep2.path = "subdir/.gitkeep"
-
-        subdir = Mock(spec=ContentFile)
-        subdir.name = "subdir"
-        subdir.type = "dir"
-        subdir.path = "subdir"
-
-        mock_ghc.repo.get_contents.side_effect = [
-            [gitkeep1, subdir],  # root
-            [gitkeep2],  # subdir
-        ]
+        mock_tree(
+            mock_ghc.repo,
+            [".gitkeep", "subdir/", "subdir/.gitkeep"],
+        )
 
         with patch("tgfs.core.repository.impl.metadata.github_repo.Github"):
             repository = GithubRepoMetadataRepository(
@@ -1031,6 +1111,8 @@ class TestEdgeCases:
         single_file.type = "file"
         single_file.path = "single.123"
 
+        # No usable tree, so the walk runs and gets a bare item back
+        mock_ghc.repo.get_git_tree.side_effect = Exception("server error")
         mock_ghc.repo.get_contents.return_value = single_file  # Single item, not list
 
         with patch("tgfs.core.repository.impl.metadata.github_repo.Github"):

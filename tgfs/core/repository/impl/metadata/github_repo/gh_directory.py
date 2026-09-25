@@ -1,3 +1,4 @@
+import datetime
 import logging
 from dataclasses import dataclass
 from typing import Optional
@@ -7,6 +8,9 @@ from github.Repository import Repository
 
 from tgfs.core.model import TGFSDirectory, TGFSFileRef
 from tgfs.crypto.path_names import encrypt_path_name
+from tgfs.utils.time import FIRST_DAY_OF_EPOCH
+
+from .dir_timestamps import DirTimestampStore
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +24,9 @@ class GithubConfig:
     # Deterministic AES-SIV key for path-name encryption. ``None`` keeps the
     # legacy behaviour of storing plaintext directory/file names in the repo.
     name_key: Optional[bytes] = None
+    # Where the directory dates come from. ``None`` leaves every loaded
+    # directory on the ``now()`` default, as it was before the cache existed.
+    timestamps: Optional[DirTimestampStore] = None
 
 
 class GithubDirectory(TGFSDirectory):
@@ -31,7 +38,15 @@ class GithubDirectory(TGFSDirectory):
         children: Optional[list[TGFSDirectory]] = None,
         files: Optional[list[TGFSFileRef]] = None,
         stored_encrypted: Optional[bool] = None,
+        defer_timestamps: bool = False,
     ):
+        # These have to exist before the dataclass initialiser runs: it assigns
+        # created_at/modified_at, which goes through the setters below.
+        self._created_at = self._modified_at = FIRST_DAY_OF_EPOCH
+        self._created_pending = defer_timestamps
+        self._modified_pending = defer_timestamps
+        self._ts_initialised = False
+
         super().__init__(name, parent, children or [], files or [])
         self._ghc = ghc
         # Whether THIS directory is stored under an encrypted name in the
@@ -43,6 +58,66 @@ class GithubDirectory(TGFSDirectory):
             if stored_encrypted is not None
             else ghc.name_key is not None
         )
+        self._ts_initialised = True
+
+    # --- dates ---------------------------------------------------------------
+    #
+    # A directory loaded from the repo does not know its dates yet: reading them
+    # costs two GitHub calls, and doing that for every directory while the tree
+    # is built is what made the boot grow with the folder count. So the load
+    # marks them pending and they are filled in from the cache on first read --
+    # never by blocking the reader, because a PROPFIND of a folder with a
+    # hundred children would otherwise pay for a hundred round trips at once.
+
+    @property
+    def created_at(self) -> datetime.datetime:
+        self._resolve_timestamps()
+        return self._created_at
+
+    @created_at.setter
+    def created_at(self, value: datetime.datetime) -> None:
+        self._created_at = value
+        if self._ts_initialised:
+            # An explicit write knows better than the git history.
+            self._created_pending = False
+
+    @property
+    def modified_at(self) -> datetime.datetime:
+        self._resolve_timestamps()
+        return self._modified_at
+
+    @modified_at.setter
+    def modified_at(self, value: datetime.datetime) -> None:
+        self._modified_at = value
+        if self._ts_initialised:
+            self._modified_pending = False
+
+    def _resolve_timestamps(self) -> None:
+        if not (self._created_pending or self._modified_pending):
+            return
+
+        store = getattr(getattr(self, "_ghc", None), "timestamps", None)
+        if store is None:
+            return
+
+        path = self._github_path
+        if not path:
+            # The root is dated from the repo's own metadata, which is free.
+            self._created_pending = self._modified_pending = False
+            return
+
+        found = store.get(path)
+        if found is None:
+            # Queued for the background workers; report the default until then.
+            return
+
+        created, modified = found
+        if self._created_pending:
+            self._created_at = created
+            self._created_pending = False
+        if self._modified_pending:
+            self._modified_at = modified
+            self._modified_pending = False
 
     @staticmethod
     def join_path(*args: str) -> str:

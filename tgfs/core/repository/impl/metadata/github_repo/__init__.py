@@ -1,11 +1,13 @@
+import asyncio
 import datetime
 import logging
 from typing import Optional
 
 from github import Github
 from github.ContentFile import ContentFile
+from github.GitTreeElement import GitTreeElement
 
-from tgfs.config import GithubRepoConfig
+from tgfs.config import GithubRepoConfig, expand_path
 from tgfs.core.model import TGFSDirectory, TGFSMetadata
 from tgfs.core.repository.interface import IMetaDataRepository
 from tgfs.crypto.path_names import (
@@ -14,6 +16,7 @@ from tgfs.crypto.path_names import (
     is_encrypted_path_name,
 )
 
+from .dir_timestamps import DirTimestampStore, cache_file_name
 from .gh_directory import GithubConfig, GithubDirectory
 
 logger = logging.getLogger(__name__)
@@ -26,19 +29,30 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
         super().__init__()
 
         gh = Github(config.access_token)
+        repo = gh.get_repo(config.repo)
+
+        self._timestamps = DirTimestampStore(
+            repo=repo,
+            branch=config.commit,
+            path=expand_path(cache_file_name(config.repo, config.commit)),
+        )
 
         self._ghc = GithubConfig(
             gh=gh,
             repo_name=config.repo,
-            repo=gh.get_repo(config.repo),
+            repo=repo,
             commit=config.commit,
             name_key=name_key,
+            timestamps=self._timestamps,
         )
 
     async def push(self) -> None:
         pass
 
     async def get(self) -> TGFSMetadata:
+        # One call to read the repo head plus at most one to diff it against
+        # the cached one. Off the event loop because PyGithub is synchronous.
+        await asyncio.to_thread(self._timestamps.load)
         root_dir = self._build_directory_structure()
         return TGFSMetadata(dir=root_dir)
 
@@ -49,12 +63,98 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
         self._restore_root_timestamps(root)
 
         try:
-            contents = self._ghc.repo.get_contents("", ref=self._ghc.commit)
-            self._process_contents(contents, root)
+            entries = self._read_tree()
+            if entries is not None:
+                self._build_from_tree(entries, root)
+            else:
+                contents = self._ghc.repo.get_contents("", ref=self._ghc.commit)
+                self._process_contents(contents, root)
         except Exception as ex:
             logger.error(ex)
 
         return root
+
+    def _read_tree(self) -> Optional[list[GitTreeElement]]:
+        """The whole repo tree in one request, or ``None`` if it is unusable.
+
+        ``get_contents`` lists exactly one directory, so walking the tree with
+        it costs one round trip per directory -- 306 of them here, all before
+        a single file can be listed. The recursive tree API returns every blob
+        and subtree at once instead, which makes the load independent of how
+        many folders the repo holds.
+
+        GitHub truncates the response for very large trees. That would silently
+        hide whole folders, so a truncated tree is refused and the caller walks
+        the old way rather than serving an incomplete filesystem.
+        """
+        try:
+            tree = self._ghc.repo.get_git_tree(self._ghc.commit, recursive=True)
+            if tree.truncated:
+                logger.warning(
+                    f"Tree of {self._ghc.repo_name}@{self._ghc.commit} came back "
+                    "truncated; falling back to a directory-by-directory walk"
+                )
+                return None
+            return list(tree.tree)
+        except Exception as ex:
+            logger.warning(
+                f"Could not read the tree of {self._ghc.repo_name}@{self._ghc.commit}, "
+                f"falling back to a directory-by-directory walk: {ex}"
+            )
+            return None
+
+    def _build_from_tree(
+        self, entries: list[GitTreeElement], root: GithubDirectory
+    ) -> None:
+        """Materialise the in-memory tree from one flat list of tree entries.
+
+        Entries carry full storage paths and arrive in no guaranteed order, so
+        directories are resolved on demand and every missing parent is created
+        along the way.
+        """
+        dirs: dict[str, GithubDirectory] = {"": root}
+
+        for entry in entries:
+            if entry.type == "tree":
+                self._dir_at(entry.path, dirs)
+            elif entry.type == "blob":
+                parent_path, _, segment = entry.path.rpartition("/")
+                if segment == ".gitkeep":
+                    continue
+                try:
+                    stored_name, message_id = segment.rsplit(".", 1)
+                    file_name, _ = self._decode_name(stored_name)
+                    TGFSDirectory.create_file_ref(
+                        self._dir_at(parent_path, dirs), file_name, int(message_id)
+                    )
+                except ValueError:
+                    logger.warning(
+                        f"Invalid name format for {segment}, expected a format like 'name.message_id'"
+                    )
+
+    def _dir_at(
+        self, storage_path: str, dirs: dict[str, GithubDirectory]
+    ) -> GithubDirectory:
+        """The directory at ``storage_path``, created with its parents if new."""
+        found = dirs.get(storage_path)
+        if found is not None:
+            return found
+
+        parent_path, _, segment = storage_path.rpartition("/")
+        dir_name, was_encrypted = self._decode_name(segment)
+        child = self._create_child_dir(
+            dir_name,
+            self._dir_at(parent_path, dirs),
+            stored_encrypted=was_encrypted,
+            defer_timestamps=True,
+        )
+        # Dates come from the cache on first read. Warming them here only
+        # queues the path; the workers pay for the lookup in the background
+        # instead of holding the load for two calls per directory.
+        if self._ghc.timestamps is not None:
+            self._ghc.timestamps.request(storage_path)
+        dirs[storage_path] = child
+        return child
 
     def _restore_root_timestamps(self, root: GithubDirectory) -> None:
         """Give the root its real dates from the repo's own metadata.
@@ -79,9 +179,14 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
         name: str,
         parent_dir: GithubDirectory,
         stored_encrypted: bool = False,
+        defer_timestamps: bool = False,
     ) -> GithubDirectory:
         child_dir = GithubDirectory(
-            self._ghc, name, parent_dir, stored_encrypted=stored_encrypted
+            self._ghc,
+            name,
+            parent_dir,
+            stored_encrypted=stored_encrypted,
+            defer_timestamps=defer_timestamps,
         )
         parent_dir.children.append(child_dir)
         return child_dir
@@ -104,43 +209,6 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
             logger.warning(f"Failed to decrypt path name {raw!r}: {ex}")
             return raw, True
 
-    def _latest_commit_date(self, path: str) -> Optional[datetime.datetime]:
-        """Date of the most recent commit touching ``path`` (newest first).
-
-        Returns ``None`` when the path has no history, so callers can fall
-        back gracefully instead of crashing the whole metadata load.
-        """
-        try:
-            commits = self._ghc.repo.get_commits(sha=self._ghc.commit, path=path)
-            return commits[0].commit.committer.date
-        except Exception as ex:
-            # Best-effort enrichment only: missing history, an API error, or any
-            # unexpected response must never abort the directory load.
-            logger.debug(f"No commit history for {path}: {ex}")
-            return None
-
-    def _restore_dir_timestamps(
-        self, directory: GithubDirectory, dir_path: str
-    ) -> None:
-        """Recover a directory's real created/modified dates from git history.
-
-        Without this the tree is rebuilt from the repo structure on every
-        load and ``created_at``/``modified_at`` fall back to ``now()`` (the
-        dataclass default), so WebDAV reports the server-start time for every
-        folder. The ``.gitkeep`` placeholder is written exactly once when the
-        directory is created and never touched again, so the commit that
-        introduced it is the true creation date; ``modified_at`` is the newest
-        commit anywhere under the directory path.
-        """
-        modified = self._latest_commit_date(dir_path)
-        created = self._latest_commit_date(f"{dir_path}/.gitkeep")
-        if created is None:
-            created = modified
-        if created is not None:
-            directory.created_at = created
-        if modified is not None:
-            directory.modified_at = modified
-
     def _process_contents(
         self, contents: list[ContentFile] | ContentFile, parent_dir: GithubDirectory
     ) -> None:
@@ -154,9 +222,16 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
                 # content.path (the storage path) for the git-history lookup.
                 dir_name, was_encrypted = self._decode_name(content.name)
                 child_dir = self._create_child_dir(
-                    dir_name, parent_dir, stored_encrypted=was_encrypted
+                    dir_name,
+                    parent_dir,
+                    stored_encrypted=was_encrypted,
+                    defer_timestamps=True,
                 )
-                self._restore_dir_timestamps(child_dir, content.path)
+                # Dates come from the cache on first read. Warming them here
+                # only queues the path; the workers pay for the lookup in the
+                # background instead of holding the boot for two calls each.
+                if self._ghc.timestamps is not None:
+                    self._ghc.timestamps.request(content.path)
                 try:
                     child_contents = self._ghc.repo.get_contents(
                         content.path, ref=self._ghc.commit
