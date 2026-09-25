@@ -123,12 +123,27 @@ class TestProppatch:
 
         assert statuses(xml) == {
             f"{DAV}getlastmodified": "HTTP/1.1 200 OK",
-            f"{MS}Win32CreationTime": "HTTP/1.1 403 Forbidden",
-            f"{MS}Win32FileAttributes": "HTTP/1.1 403 Forbidden",
+            f"{MS}Win32CreationTime": "HTTP/1.1 200 OK",
+            f"{MS}Win32FileAttributes": "HTTP/1.1 200 OK",
             "{http://example.com/}color": "HTTP/1.1 403 Forbidden",
             "{http://example.com/}gone": "HTTP/1.1 200 OK",
         }
         assert await resource.last_modified() == 946684800000
+
+    @pytest.mark.asyncio
+    async def test_windows_attributes_are_accepted_and_not_stored(self):
+        resource = MockResource("/test.txt")
+        updates = [
+            PropertyUpdate(f"{MS}Win32CreationTime", "Sat, 01 Jan 2000 00:00:00 GMT"),
+            PropertyUpdate(f"{MS}Win32LastAccessTime", "Sat, 01 Jan 2000 00:00:00 GMT"),
+            PropertyUpdate(f"{MS}Win32FileAttributes", "00000020"),
+        ]
+
+        xml = await proppatch(resource, updates, "")
+
+        assert set(statuses(xml).values()) == {"HTTP/1.1 200 OK"}
+        assert await resource.creation_date() == 1609459200000
+        assert await resource.last_modified() == 1609545600000
 
     @pytest.mark.asyncio
     async def test_unparseable_date_is_a_conflict(self):

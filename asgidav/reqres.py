@@ -142,6 +142,19 @@ LAST_MODIFIED_TAGS = frozenset(
     {_tag("getlastmodified"), _ms_tag("Win32LastModifiedTime")}
 )
 
+# Windows attributes that come along with the modification time. Windows
+# clients (CarotDAV, the Explorer's mini-redirector) send all four in one
+# PROPPATCH and treat anything but 200 on any of them as a failed upload,
+# so these are accepted and not stored -- the same policy the SFTP side
+# applies to chmod, chown and touch.
+ACCEPTED_TAGS = frozenset(
+    {
+        _ms_tag("Win32CreationTime"),
+        _ms_tag("Win32LastAccessTime"),
+        _ms_tag("Win32FileAttributes"),
+    }
+)
+
 # Live properties this server computes and never lets a client change.
 PROTECTED_TAGS = frozenset(
     {
@@ -153,9 +166,6 @@ PROTECTED_TAGS = frozenset(
         _tag("resourcetype"),
         _tag("lockdiscovery"),
         _tag("supportedlock"),
-        _ms_tag("Win32CreationTime"),
-        _ms_tag("Win32LastAccessTime"),
-        _ms_tag("Win32FileAttributes"),
     }
 )
 
@@ -224,9 +234,12 @@ def parse_http_date(value: str) -> int:
 async def _apply_property(member: Member, update: PropertyUpdate) -> HTTPStatus:
     """Apply one property update and say how it went, RFC 4918 9.2 style.
 
-    200 when stored, 403 for a property this server computes itself or
-    cannot store, 409 for a value the member does not accept.
+    200 when stored (or accepted, see ``ACCEPTED_TAGS``), 403 for a
+    property this server computes itself or cannot store, 409 for a value
+    the member does not accept.
     """
+    if update.tag in ACCEPTED_TAGS:
+        return HTTPStatus.OK
     if update.tag in LAST_MODIFIED_TAGS:
         if update.remove:
             return HTTPStatus.FORBIDDEN

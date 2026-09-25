@@ -112,7 +112,12 @@ class TestSetLastModified:
 
     @pytest.mark.asyncio
     async def test_what_carotdav_sends_after_an_upload(self, http, ops):
-        """The time is kept, the Windows attributes are declined, no error."""
+        """Every property is 200: the time is kept, the attributes accepted.
+
+        CarotDAV treats anything but 200 on any of the four as a failed
+        upload, so accepting the attributes it sends is what keeps the
+        transfer green.
+        """
         await ops.upload_from_bytes(b"x" * 10, "/dir/a.txt")
 
         resp = proppatch(
@@ -126,10 +131,10 @@ class TestSetLastModified:
 
         assert resp.status_code == 207
         assert statuses(resp) == {
-            f"{MS}Win32CreationTime": "HTTP/1.1 403 Forbidden",
-            f"{MS}Win32LastAccessTime": "HTTP/1.1 403 Forbidden",
+            f"{MS}Win32CreationTime": "HTTP/1.1 200 OK",
+            f"{MS}Win32LastAccessTime": "HTTP/1.1 200 OK",
             f"{MS}Win32LastModifiedTime": "HTTP/1.1 200 OK",
-            f"{MS}Win32FileAttributes": "HTTP/1.1 403 Forbidden",
+            f"{MS}Win32FileAttributes": "HTTP/1.1 200 OK",
         }
         assert await latest_timestamp(ops, "/dir/a.txt") == Y2K_MS
 
