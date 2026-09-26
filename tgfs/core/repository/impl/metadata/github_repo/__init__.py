@@ -8,7 +8,7 @@ from github.ContentFile import ContentFile
 from github.GitTreeElement import GitTreeElement
 
 from tgfs.config import GithubRepoConfig, expand_path
-from tgfs.core.model import TGFSDirectory, TGFSMetadata
+from tgfs.core.model import TGFSMetadata
 from tgfs.core.repository.interface import IMetaDataRepository
 from tgfs.crypto.path_names import (
     PathNameEncryptionError,
@@ -124,8 +124,10 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
                 try:
                     stored_name, message_id = segment.rsplit(".", 1)
                     file_name, _ = self._decode_name(stored_name)
-                    TGFSDirectory.create_file_ref(
-                        self._dir_at(parent_path, dirs), file_name, int(message_id)
+                    # attach, not create: the directory's date is the git
+                    # history's, not the moment this tree was rebuilt.
+                    self._dir_at(parent_path, dirs).attach_file_ref(
+                        file_name, int(message_id)
                     )
                 except ValueError:
                     logger.warning(
@@ -247,9 +249,7 @@ class GithubRepoMetadataRepository(IMetaDataRepository):
                         continue
                     stored_name, message_id = content.name.rsplit(".", 1)
                     file_name, _ = self._decode_name(stored_name)
-                    TGFSDirectory.create_file_ref(
-                        parent_dir, file_name, int(message_id)
-                    )
+                    parent_dir.attach_file_ref(file_name, int(message_id))
                 except ValueError:
                     logger.warning(
                         f"Invalid name format for {content.name}, expected a format like 'name.message_id'"

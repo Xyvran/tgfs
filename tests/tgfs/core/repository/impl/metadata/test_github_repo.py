@@ -267,7 +267,9 @@ class TestGithubRepoMetadataRepository:
         mock_github_instance.get_repo.return_value = mock_repo
         mock_github_class.return_value = mock_github_instance
 
-        mock_tree(mock_repo, ["Serien/", "Serien/.gitkeep"])
+        # A file inside the folder: adding it used to stamp the folder with
+        # the boot time and so hide the cached date.
+        mock_tree(mock_repo, ["Serien/", "Serien/.gitkeep", "Serien/show.123"])
 
         created = datetime.datetime(2024, 3, 1, 12, 0, tzinfo=datetime.timezone.utc)
         modified = datetime.datetime(2025, 7, 4, 8, 30, tzinfo=datetime.timezone.utc)
@@ -301,11 +303,63 @@ class TestGithubRepoMetadataRepository:
         root_dir = repository._build_directory_structure()
 
         sub_dir = root_dir.children[0]
+        assert [f.name for f in sub_dir.files] == ["show"]
         assert sub_dir.created_at == created
         assert sub_dir.modified_at == modified
         # No git history was read and no diff was needed to get there.
         mock_repo.get_commits.assert_not_called()
         mock_repo.compare.assert_not_called()
+
+    @patch("tgfs.core.repository.impl.metadata.github_repo.Github")
+    def test_the_directory_walk_keeps_the_cached_dates_too(
+        self, mock_github_class, mock_github_config, tmp_path
+    ):
+        """The fallback walk adds files the same way and must not date folders."""
+        mock_github_instance = Mock(spec=Github)
+        mock_repo = Mock(spec=Repository)
+        mock_repo.full_name = "owner/test-repo"
+        mock_github_instance.get_repo.return_value = mock_repo
+        mock_github_class.return_value = mock_github_instance
+
+        mock_tree(mock_repo, ["Serien/"], truncated=True)
+        folder = Mock(spec=ContentFile)
+        folder.name, folder.type, folder.path = "Serien", "dir", "Serien"
+        show = Mock(spec=ContentFile)
+        show.name, show.type, show.path = "show.123", "file", "Serien/show.123"
+        mock_repo.get_contents.side_effect = [[folder], [show]]
+
+        modified = datetime.datetime(2025, 7, 4, 8, 30, tzinfo=datetime.timezone.utc)
+        cache = tmp_path / "dir-timestamps.json"
+        cache.write_text(
+            json.dumps(
+                {
+                    "version": CACHE_VERSION,
+                    "repo": "owner/test-repo",
+                    "branch": "main",
+                    "head": "cafe1234",
+                    "paths": {
+                        "Serien": {
+                            "created": modified.isoformat(),
+                            "modified": modified.isoformat(),
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        mock_repo.get_branch.return_value.commit.sha = "cafe1234"
+
+        repository = GithubRepoMetadataRepository(mock_github_config)
+        store = DirTimestampStore(repo=mock_repo, branch="main", path=str(cache))
+        repository._timestamps = store
+        repository._ghc.timestamps = store
+        store.load()
+
+        root_dir = repository._build_directory_structure()
+
+        sub_dir = root_dir.children[0]
+        assert [f.name for f in sub_dir.files] == ["show"]
+        assert sub_dir.modified_at == modified
 
     @patch("tgfs.core.repository.impl.metadata.github_repo.Github")
     def test_reads_encrypted_and_legacy_names(

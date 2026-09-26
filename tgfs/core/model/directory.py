@@ -151,7 +151,14 @@ class TGFSDirectory:
             raise FileOrDirectoryDoesNotExist(name)
         return files[0]
 
-    def create_file_ref(self, name: str, fd_message_id: int) -> TGFSFileRef:
+    def attach_file_ref(self, name: str, fd_message_id: int) -> TGFSFileRef:
+        """Add a file ref without dating the directory.
+
+        For rebuilding a tree from storage: the file already existed and the
+        directory's dates come from the storage's own history. Dating the
+        directory here would stamp it with the boot time instead -- which
+        is what every folder with a file in it used to report.
+        """
         if self.find_files([name]):
             raise FileOrDirectoryAlreadyExists(name)
 
@@ -161,6 +168,10 @@ class TGFSDirectory:
             location=self,
         )
         self.files.append(fr)
+        return fr
+
+    def create_file_ref(self, name: str, fd_message_id: int) -> TGFSFileRef:
+        fr = self.attach_file_ref(name, fd_message_id)
         self._touch_modified()
         return fr
 

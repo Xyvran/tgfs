@@ -499,6 +499,24 @@ class TestTGFSDirectory:
         assert parent.modified_at_timestamp > original_created
         assert parent.created_at_timestamp == original_created
 
+    def test_attach_file_ref_keeps_modified_at(self):
+        """Rebuilding a tree from storage must not date its directories."""
+        parent = TGFSDirectory(name="parent", parent=None)
+        parent.modified_at = datetime.datetime(2020, 1, 1)
+
+        fr = parent.attach_file_ref("old.txt", 1)
+
+        assert parent.files == [fr]
+        assert fr.location is parent
+        assert parent.modified_at == datetime.datetime(2020, 1, 1)
+
+    def test_attach_file_ref_rejects_a_duplicate_name(self):
+        parent = TGFSDirectory(name="parent", parent=None)
+        parent.attach_file_ref("a.txt", 1)
+
+        with pytest.raises(FileOrDirectoryAlreadyExists):
+            parent.attach_file_ref("a.txt", 2)
+
     def test_delete_file_ref_bumps_modified_at(self):
         parent = TGFSDirectory(name="parent", parent=None)
         fr = parent.create_file_ref("doomed.txt", 1)
