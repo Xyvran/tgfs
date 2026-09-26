@@ -1,12 +1,14 @@
 import { Delete } from "@mui/icons-material";
-import { Box, IconButton } from "@mui/material";
+import { Box, Checkbox, FormControlLabel, IconButton } from "@mui/material";
 import { ConfigTextField } from "./ConfigTextField";
 
 interface UserFieldProps {
   username: string;
   password: string;
+  readonly: boolean;
   onUsernameChange: (username: string) => void;
   onPasswordChange: (password: string) => void;
+  onReadonlyChange: (readonly: boolean) => void;
   onDelete?: () => void;
   canDelete: boolean;
 }
@@ -14,8 +16,10 @@ interface UserFieldProps {
 export function UserField({
   username,
   password,
+  readonly,
   onUsernameChange,
   onPasswordChange,
+  onReadonlyChange,
   onDelete,
   canDelete,
 }: UserFieldProps) {
@@ -34,6 +38,17 @@ export function UserField({
         onChange={(e) => onPasswordChange(e.target.value)}
         style={{ flex: 1 }}
         required
+      />
+      <FormControlLabel
+        label="Read-only"
+        sx={{ mt: 0.25, whiteSpace: "nowrap" }}
+        control={
+          <Checkbox
+            checked={readonly}
+            onChange={(e) => onReadonlyChange(e.target.checked)}
+            size="small"
+          />
+        }
       />
       {canDelete && onDelete && (
         <IconButton
