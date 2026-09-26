@@ -10,7 +10,6 @@ import {
   CardContent,
   Checkbox,
   Container,
-  Divider,
   FormControl,
   FormControlLabel,
   InputLabel,
@@ -26,26 +25,90 @@ import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { BotTokenField } from "./components/BotTokenField";
 import { ChannelField } from "./components/ChannelField";
 import { ConfigTextField } from "./components/ConfigTextField";
-import { DockerRunPanel } from "./components/DockerRunPanel";
 import {
   EncryptionConfig,
   EncryptionField,
 } from "./components/EncryptionField";
 import { FieldRow } from "./components/FieldRow";
 import { FormSection } from "./components/FormSection";
-import { LoadConfigButton } from "./components/LoadConfigButton";
 import { UserField } from "./components/UserField";
-import { importConfig } from "./config-import";
-import {
-  ChannelConfig,
-  ConfigData,
-  RedundancyConfig,
-  SftpConfig,
-  TransferConfig,
-  UserConfig,
-  defaultConfig,
-  newChannel,
-} from "./types";
+
+interface ChannelConfig {
+  id: string;
+  name: string;
+  type: "pinned_message" | "github_repo";
+  mirrors: string[];
+  github_repo?: {
+    repo: string;
+    commit: string;
+    access_token: string;
+  };
+}
+
+interface RedundancyConfig {
+  enabled: boolean;
+  mode: "forward" | "reupload";
+  strict: boolean;
+}
+
+interface SftpConfig {
+  enabled: boolean;
+  host: string;
+  port: number;
+  host_key_file: string;
+  authorized_keys_dir: string;
+  upload_buffer_size_mb: number;
+}
+
+interface TransferConfig {
+  // UI only: when off, no transfer block is written at all and the
+  // application falls back to its own defaults.
+  enabled: boolean;
+  upload_workers_small: number;
+  upload_workers_big: number;
+  upload_part_size_kb: number;
+  download_piece_size_kb: number;
+  download_pieces_in_flight: number;
+  parallel_download_threshold_mb: number;
+  connection_pool_size: number;
+  chunk_cache_mb: number;
+  chunk_cache_readahead: number;
+  chunk_cache_block_kb: number;
+}
+
+interface ConfigData {
+  telegram: {
+    api_id: string;
+    api_hash: string;
+    lib: "pyrogram" | "telethon";
+    account: {
+      session_file: string;
+    };
+    bot: {
+      session_file: string;
+      tokens: string[];
+    };
+    channels: ChannelConfig[];
+  };
+  tgfs: {
+    users: {
+      username: string;
+      password: string;
+    }[];
+    jwt: {
+      secret: string;
+      algorithm: string;
+      life: number;
+    };
+    server: {
+      host: string;
+      port: number;
+    };
+    sftp: SftpConfig;
+    transfer: TransferConfig;
+    encryption: EncryptionConfig;
+  };
+}
 
 // Type-safe path mapping for updateConfig
 type ConfigUpdatePaths = {
@@ -54,7 +117,7 @@ type ConfigUpdatePaths = {
   "telegram.lib": "pyrogram" | "telethon";
   "telegram.channels": ChannelConfig[];
   "telegram.bot.tokens": string[];
-  "tgfs.users": UserConfig[];
+  "tgfs.users": { username: string; password: string }[];
   "tgfs.jwt.secret": string;
   "tgfs.jwt.algorithm": string;
   "tgfs.jwt.life": number;
@@ -84,13 +147,81 @@ export default function ConfigGenerator() {
     strict: false,
   });
 
-  const [config, setConfig] = useState<ConfigData>(defaultConfig);
-  // Outcome of the last "Load Existing config.yaml", shown above the form.
-  const [importResult, setImportResult] = useState<{
-    severity: "success" | "error";
-    message: string;
-    notes: string[];
-  } | null>(null);
+  const [config, setConfig] = useState<ConfigData>({
+    telegram: {
+      api_id: "",
+      api_hash: "",
+      lib: "telethon",
+      account: {
+        session_file: "account.session",
+      },
+      bot: {
+        session_file: "bot.session",
+        tokens: [""],
+      },
+      channels: [
+        {
+          id: "",
+          name: "default",
+          type: "pinned_message",
+          mirrors: [],
+          github_repo: {
+            repo: "",
+            commit: "master",
+            access_token: "",
+          },
+        },
+      ],
+    },
+    tgfs: {
+      users: [
+        {
+          username: "user",
+          password: "password",
+        },
+      ],
+      jwt: {
+        secret: "",
+        algorithm: "HS256",
+        life: 604800,
+      },
+      server: {
+        host: "0.0.0.0",
+        port: 1900,
+      },
+      sftp: {
+        enabled: false,
+        host: "0.0.0.0",
+        port: 2222,
+        host_key_file: "sftp_host_key",
+        authorized_keys_dir: "",
+        upload_buffer_size_mb: 64,
+      },
+      transfer: {
+        enabled: false,
+        upload_workers_small: 3,
+        upload_workers_big: 8,
+        upload_part_size_kb: 512,
+        download_piece_size_kb: 4096,
+        download_pieces_in_flight: 4,
+        parallel_download_threshold_mb: 10,
+        connection_pool_size: 1,
+        chunk_cache_mb: 0,
+        chunk_cache_readahead: 2,
+        chunk_cache_block_kb: 1024,
+      },
+      encryption: {
+        enabled: false,
+        encrypt_names: false,
+        passphrase_source: "passphrase_env",
+        passphrase: "",
+        passphrase_env: "TGFS_MASTER_PASSPHRASE",
+        passphrase_file: "secrets/master.passphrase",
+        master_salt_file: "master.salt",
+        chunk_size: 65536,
+      },
+    },
+  });
 
   const updateConfig = useCallback(
     <K extends keyof ConfigUpdatePaths>(
@@ -110,7 +241,10 @@ export default function ConfigGenerator() {
       } else if (path === "telegram.bot.tokens") {
         newConfig.telegram.bot.tokens = value as string[];
       } else if (path === "tgfs.users") {
-        newConfig.tgfs.users = value as UserConfig[];
+        newConfig.tgfs.users = value as {
+          username: string;
+          password: string;
+        }[];
       } else if (path === "tgfs.jwt.secret") {
         newConfig.tgfs.jwt.secret = value as string;
       } else if (path === "tgfs.jwt.algorithm") {
@@ -140,33 +274,6 @@ export default function ConfigGenerator() {
       updateConfig("tgfs.jwt.secret", generateRandomSecret());
     }
   }, [config.tgfs.jwt.secret, updateConfig]);
-
-  const loadConfig = (text: string) => {
-    try {
-      const imported = importConfig(text);
-      setConfig(imported.config);
-      setRedundancy(imported.redundancy);
-      setWithUserAccountUpload(imported.withUserAccountUpload);
-      setWithUserAccountDownload(imported.withUserAccountDownload);
-      setImportResult({
-        severity: "success",
-        message:
-          imported.notes.length === 0
-            ? "The config was loaded into the form."
-            : "The config was loaded into the form; a few things did not carry over:",
-        notes: imported.notes,
-      });
-    } catch (err) {
-      setImportResult({
-        severity: "error",
-        message: `The file could not be read as a config.yaml: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-        notes: [],
-      });
-    }
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  };
 
   const addBotToken = () => {
     const newTokens = [...config.telegram.bot.tokens, ""];
@@ -262,13 +369,10 @@ export default function ConfigGenerator() {
       tgfs: {
         users: config.tgfs.users.reduce((acc, user) => {
           if (user.username.trim() !== "") {
-            acc[user.username] = {
-              password: user.password,
-              ...(user.readonly ? { readonly: true } : {}),
-            };
+            acc[user.username] = { password: user.password };
           }
           return acc;
-        }, {} as { [key: string]: { password: string; readonly?: boolean } }),
+        }, {} as { [key: string]: { password: string } }),
         jwt: config.tgfs.jwt,
         metadata,
         server: config.tgfs.server,
@@ -358,10 +462,7 @@ export default function ConfigGenerator() {
   };
 
   const addUser = () => {
-    const newUsers = [
-      ...config.tgfs.users,
-      { username: "", password: "", readonly: false },
-    ];
+    const newUsers = [...config.tgfs.users, { username: "", password: "" }];
     updateConfig("tgfs.users", newUsers);
   };
 
@@ -370,20 +471,30 @@ export default function ConfigGenerator() {
     updateConfig("tgfs.users", newUsers);
   };
 
-  const updateUser = <K extends keyof UserConfig>(
+  const updateUser = (
     index: number,
-    field: K,
-    value: UserConfig[K]
+    field: "username" | "password",
+    value: string
   ) => {
     const newUsers = [...config.tgfs.users];
-    newUsers[index] = { ...newUsers[index], [field]: value };
+    newUsers[index][field] = value;
     updateConfig("tgfs.users", newUsers);
   };
 
   const addChannel = () => {
     const newChannels = [
       ...config.telegram.channels,
-      newChannel(`channel-${config.telegram.channels.length + 1}`),
+      {
+        id: "",
+        name: `channel-${config.telegram.channels.length + 1}`,
+        type: "pinned_message" as const,
+        mirrors: [],
+        github_repo: {
+          repo: "",
+          commit: "master",
+          access_token: "",
+        },
+      },
     ];
     updateConfig("telegram.channels", newChannels);
   };
@@ -541,23 +652,6 @@ export default function ConfigGenerator() {
         Keep your API credentials and bot tokens secure. Never share them
         publicly.
       </Alert>
-
-      {importResult && (
-        <Alert
-          severity={importResult.severity}
-          onClose={() => setImportResult(null)}
-          sx={{ mb: 3 }}
-        >
-          {importResult.message}
-          {importResult.notes.length > 0 && (
-            <Box component="ul" sx={{ m: 0, mt: 1, pl: 2.5 }}>
-              {importResult.notes.map((note) => (
-                <li key={note}>{note}</li>
-              ))}
-            </Box>
-          )}
-        </Alert>
-      )}
 
       <Box
         sx={{
@@ -754,15 +848,11 @@ export default function ConfigGenerator() {
                     key={index}
                     username={user.username}
                     password={user.password}
-                    readonly={user.readonly}
                     onUsernameChange={(username) =>
                       updateUser(index, "username", username)
                     }
                     onPasswordChange={(password) =>
                       updateUser(index, "password", password)
-                    }
-                    onReadonlyChange={(readonly) =>
-                      updateUser(index, "readonly", readonly)
                     }
                     onDelete={index > 0 ? () => removeUser(index) : undefined}
                     canDelete={index > 0}
@@ -1283,17 +1373,7 @@ export default function ConfigGenerator() {
         </Box>
 
         <Box sx={{ width: { xs: "100%", md: "400px" }, flexShrink: 0 }}>
-          <Paper
-            sx={{
-              p: 3,
-              position: "sticky",
-              top: 24,
-              // Taller than the viewport, the panel scrolls on its own so
-              // the Docker command below the YAML stays reachable.
-              maxHeight: { md: "calc(100vh - 48px)" },
-              overflowY: "auto",
-            }}
-          >
+          <Paper sx={{ p: 3, position: "sticky", top: 24 }}>
             <Typography variant="h6" gutterBottom>
               Generated Configuration
             </Typography>
@@ -1313,21 +1393,9 @@ export default function ConfigGenerator() {
                 variant="outlined"
                 startIcon={<ContentCopy />}
                 onClick={copyToClipboard}
-                sx={{ mb: 1 }}
               >
                 Copy to Clipboard
               </Button>
-              <LoadConfigButton
-                fullWidth
-                onLoad={loadConfig}
-                onError={(message) =>
-                  setImportResult({
-                    severity: "error",
-                    message: `The file could not be read: ${message}`,
-                    notes: [],
-                  })
-                }
-              />
             </Box>
 
             <Card variant="outlined">
@@ -1344,26 +1412,6 @@ export default function ConfigGenerator() {
                 </SyntaxHighlighter>
               </CardContent>
             </Card>
-
-            <Divider sx={{ my: 3 }} />
-
-            <DockerRunPanel
-              image="xyvran/tgfs"
-              containerName="tgfs"
-              dataDir="/home/tgfs/.tgfs"
-              hostDirName=".tgfs"
-              ports={[
-                config.tgfs.server.port,
-                ...(config.tgfs.sftp.enabled ? [config.tgfs.sftp.port] : []),
-              ]}
-              envVars={
-                config.tgfs.encryption.enabled &&
-                config.tgfs.encryption.passphrase_source === "passphrase_env" &&
-                config.tgfs.encryption.passphrase_env.trim() !== ""
-                  ? [config.tgfs.encryption.passphrase_env.trim()]
-                  : []
-              }
-            />
           </Paper>
         </Box>
       </Box>
