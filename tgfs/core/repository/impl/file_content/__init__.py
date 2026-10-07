@@ -84,7 +84,11 @@ class TGMsgFileContentRepository(IFileContentRepository):
 
     async def save(self, file_msg: UploadableFileMessage) -> List[SentFileMessage]:
         size = file_msg.get_size()
-
+        
+        # Check if this is a streaming message that might not know its file size yet
+        # This can be detected via type checking or by checking for missing size information
+        
+        # For now, proceed with the existing logic but add support in a follow-up step
         res: List[SentFileMessage] = []
         file_name = file_msg.name or "unnamed"
 

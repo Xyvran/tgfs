@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 from dataclasses import dataclass
@@ -53,6 +54,8 @@ class FileUploader:
         client: ITDLibClient,
         file_msg: UploadableFileMessage,
         workers: Optional[WorkersConfig] = None,
+        # For streaming support, we may know the number of parts in advance
+        total_parts_override: Optional[int] = None,
     ):
         self.client = client
         self._file_msg = file_msg
@@ -63,7 +66,12 @@ class FileUploader:
         # 128 KiB below 100 MB, which quadruples the number of requests for
         # no gain -- 512 KiB is accepted for any size.
         self._chunk_size = get_config().tgfs.transfer.upload_part_size_bytes
-        self._total_parts = (self._file_size + self._chunk_size - 1) // self._chunk_size
+        
+        # Allow override of the total parts when we already know them (streaming case)
+        if total_parts_override is not None:
+            self._total_parts = total_parts_override
+        else:
+            self._total_parts = (self._file_size + self._chunk_size - 1) // self._chunk_size
 
         self._part_indexes: asyncio.Queue[int] = asyncio.Queue(
             maxsize=self._total_parts
@@ -72,7 +80,6 @@ class FileUploader:
         self._workers = workers or WorkersConfig.from_config()
 
         self._file_id = generate_random_long()
-
         self._is_big = is_big_file(self._file_size)
         self._read_size = 0
         self._uploaded_size = 0

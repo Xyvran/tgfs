@@ -9,7 +9,7 @@
 [![Docker build](https://img.shields.io/github/actions/workflow/status/Xyvran/tgfs/docker-publish.yml?branch=master&style=for-the-badge&label=docker%20build)](https://github.com/Xyvran/tgfs/actions/workflows/docker-publish.yml)
 [![Image size](https://img.shields.io/docker/image-size/xyvran/tgfs/latest?style=for-the-badge&label=image)](https://hub.docker.com/r/xyvran/tgfs/tags)
 
-# tgfs
+# TGFS
 
 Telegram becomes a WebDAV and SFTP server.
 

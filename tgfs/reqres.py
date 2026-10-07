@@ -1,8 +1,9 @@
+
 import asyncio
 import os
 from dataclasses import dataclass, field
 from io import IOBase
-from typing import AsyncIterator, Dict, Optional, Tuple
+from typing import AsyncIterator, Dict, Optional, Tuple, List
 
 from tgfs.tasks.integrations import TaskTracker
 
@@ -168,7 +169,7 @@ class UploadableFileMessage(FileMessage):
     tags: FileTags
     _offset: int
     _read_size: int
-
+    
     task_tracker: Optional[TaskTracker]
 
     def _get_size(self) -> int:
@@ -192,6 +193,86 @@ class UploadableFileMessage(FileMessage):
     def next_part(self, part_size: int) -> None:
         self._offset += part_size
         self._read_size = 0
+
+
+@dataclass
+class UploadableFileMessageStreaming(UploadableFileMessage):
+    """
+    Streaming upload that can handle unknown-size files.
+    
+    The main difference from UploadableFileMessage is that a streaming message doesn't
+    know its size at creation time, and parts are uploaded individually without 
+    requiring total file size upfront.
+    """  
+    # For partial reads to maintain state
+    _pending_data: bytearray = field(default_factory=bytearray)
+    
+    def __post_init__(self):
+        # Initialize the base class properly for streaming use case
+        if self.size is None:
+            self.size = 0
+
+    async def read(self, length: int) -> bytes:
+        """
+        Read from pending data and handle reading from stream.
+        This method should be overridden by streaming implementations.
+        """
+        raise NotImplementedError("Subclasses must implement the read method")
+        
+    @classmethod
+    def new(cls, name: str = "unnamed") -> "UploadableFileMessageStreaming":
+        return cls(
+            name=name,
+            caption="",
+            tags=FileTags(),
+            _offset=0,
+            size=0,
+            task_tracker=None,
+            _read_size=0,
+            _pending_data=bytearray()
+        )
+
+
+@dataclass
+class StreamingPartInfo:
+    """Information about a single uploaded part for streaming."""
+    message_id: int
+    size: int
+
+
+class StreamingUploadManager:
+    """Manages a streaming upload session and tracks individual parts"""
+    
+    def __init__(self, part_size_bytes: int = 512 * 1024 * 1024):  # Default 512MB
+        self.parts: List[StreamingPartInfo] = []
+        self.pending_parts: List[int] = []  # message IDs of upload jobs in-flight
+        self.total_size: int = 0
+        self._part_size_bytes = part_size_bytes 
+        self._current_part_buffer: bytearray = bytearray()
+        self._buffered_part_size: int = 0  # Size of the part currently being buffered
+        
+    def add_part(self, message_id: int, size: int) -> None:
+        """Add uploaded part metadata"""
+        self.parts.append(StreamingPartInfo(message_id=message_id, size=size))
+        self.total_size += size
+     
+    def remove_part(self, message_id: int) -> bool:
+        """Remove a single part by message_id if exists"""
+        for i, part in enumerate(self.parts):
+            if part.message_id == message_id:
+                self.parts.pop(i)
+                self.total_size -= part.size
+                return True
+        return False
+        
+    @property
+    def part_count(self) -> int:
+        """Get the count of uploaded parts"""
+        return len(self.parts)
+        
+    def get_parts_with_sizes(self) -> List[Tuple[int, int]]:
+        """Get list of (message_id, size) tuples"""
+        return [(part.message_id, part.size) for part in self.parts]
 
 
 @dataclass
@@ -304,6 +385,9 @@ class FileMessageFromStream(UploadableFileMessage):
         del self.buffer[:size_to_return]
         self._read_size += size_to_return
         return res
+
+    def file_name(self) -> str:
+        return self.name or "unnamed"
 
 
 @dataclass
